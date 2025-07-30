@@ -1,0 +1,94 @@
+# 排除整个data目录（包含所有生成文件和大型RLIB文件）
+data/
+
+# 个人配置文件
+CLAUDE.md
+CLAUDE-*.md
+*_GUIDE.md
+*_SUMMARY.md
+PROJECT_*.md
+IDA_USAGE.md
+Dockerfile.build
+DUAL_LAYER_ARCHITECTURE.md
+CROSS_COMPILATION_GUIDE.md
+UPGRADE_SUMMARY.md
+SOLANA_DEPENDENCIES_GUIDE.md
+SOLANA_SIGNATURES_SUMMARY.md
+COLLISION_HANDLING_SUMMARY.md
+
+# 临时和测试文件
+test_*.py
+demo_*.py
+debug_*.py
+analyze_*.py
+extract_*.py
+generate_*.py
+compare_*.py
+handle_*.py
+verify_*.py
+validate_*.py
+example_usage.py
+
+# 临时目录和输出
+temp_*/
+signatures_*/
+collision_aware_output/
+demo_output/
+*_test/
+*_output/
+*_final/
+*_enhanced/
+
+# 特定的临时文件
+temp_join_analysis.pat
+*.pat
+*.sig
+*.exc
+*.err
+
+# 第三方内容
+openssl-*/
+openssl-*.tar.gz
+
+# 系统和编译文件
+logs/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.o
+*.d
+*.so
+*.a
+*.ld
+lib.rmeta
+*.rcgu.o
+.DS_Store
+.cache/
+*.log
+
+# Git
+.git/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db

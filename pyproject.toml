@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rust-x86_64-ida-signatures"
+version = "0.1.0"
+description = "Generate IDA FLIRT signatures from Rust libraries"
+authors = [{name = "Development Team", email = "dev@example.com"}]
+dependencies = [
+    "click>=8.0.0",
+    "pydantic>=2.0.0",
+    "requests>=2.28.0",
+    "pyelftools>=0.29",
+    "arpy>=2.3.0",
+    "packaging>=21.0",
+    "pyyaml>=6.0",
+    "colorama>=0.4.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-mock>=3.10",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "black>=23.0",
+]
+
+[project.scripts]
+rust-ida-sigs = "src.cli.main:cli"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+select = ["E", "F", "W", "C", "N", "UP", "B", "S"]
+ignore = ["E203", "E501", "S101"]
+
+[tool.ruff.per-file-ignores]
+"tests/*" = ["S101", "S106"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "--cov=src --cov-report=html --cov-report=term-missing --cov-fail-under=85"

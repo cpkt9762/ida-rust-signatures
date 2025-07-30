@@ -1,0 +1,22 @@
+project_name: "solana_libs"
+target: "x86_64-unknown-linux-gnu"
+
+dependencies:
+  solana-sdk: "2.1"
+  solana-client: "2.1" 
+  solana-account-decoder: "2.1"
+
+build_config:
+  profile: "release"
+  features: []
+  no_default_features: false
+  
+compilation:
+  debug_info: true
+  optimization_level: 2
+  link_time_optimization: false
+  
+output:
+  rlib_dir: "data/compiled/rlibs"
+  objects_dir: "data/compiled/objects"
+  signatures_dir: "data/signatures"
