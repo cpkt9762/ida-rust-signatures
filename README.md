@@ -34,9 +34,28 @@ rustup target add x86_64-unknown-linux-gnu
 pip install -r requirements.txt
 ```
 
-3. **Verify IDA FLAIR tools** are available at:
+3. **Configure IDA FLAIR tools path**:
+
+**macOS**:
 ```bash
 export FLAIR_DIR="/Applications/IDA Professional 9.1.app/Contents/MacOS/tools/flair"
+```
+
+**Windows**:
+```cmd
+# Command Prompt
+set FLAIR_DIR="C:\Program Files\IDA Professional 9.1\tools\flair"
+
+# PowerShell
+$env:FLAIR_DIR="C:\Program Files\IDA Professional 9.1\tools\flair"
+```
+
+**Linux**:
+```bash
+# Common installation paths
+export FLAIR_DIR="/opt/ida-pro/tools/flair"
+# Or user installation
+export FLAIR_DIR="$HOME/ida-pro/tools/flair"
 ```
 
 ### Basic Usage
@@ -167,8 +186,31 @@ rust-x86_64-ida-signatures/
 
 - `RUST_VERSION`: Rust compiler version (default: 1.84.1)
 - `TARGET_ARCH`: Target architecture (default: x86_64-unknown-linux-gnu)
-- `FLAIR_DIR`: Path to IDA FLAIR tools directory
+- `FLAIR_DIR`: Path to IDA FLAIR tools directory (platform-specific, see installation)
 - `LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR)
+
+#### Platform-Specific FLAIR_DIR Configuration
+
+**macOS** (persistent):
+```bash
+echo 'export FLAIR_DIR="/Applications/IDA Professional 9.1.app/Contents/MacOS/tools/flair"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+**Windows** (persistent):
+```cmd
+# Set permanently via System Properties
+setx FLAIR_DIR "C:\Program Files\IDA Professional 9.1\tools\flair"
+
+# Or add to PowerShell profile
+echo '$env:FLAIR_DIR="C:\Program Files\IDA Professional 9.1\tools\flair"' >> $PROFILE
+```
+
+**Linux** (persistent):
+```bash
+echo 'export FLAIR_DIR="/opt/ida-pro/tools/flair"' >> ~/.bashrc
+source ~/.bashrc
+```
 
 ### Configuration Files
 
@@ -398,9 +440,30 @@ pytest --cov=src --cov-report=html  # Coverage report
 ### Common Issues
 
 1. **FLAIR tools not found**:
-   - Ensure IDA Pro is installed with FLAIR tools
-   - Set `FLAIR_DIR` environment variable
-   - Check tool permissions: `chmod +x /path/to/flair/*`
+   
+   **All platforms**:
+   - Ensure IDA Pro is installed with FLAIR tools included
+   - Verify the `FLAIR_DIR` environment variable is set correctly
+   
+   **macOS/Linux**:
+   ```bash
+   # Check if tools exist and are executable
+   ls -la "$FLAIR_DIR"
+   chmod +x "$FLAIR_DIR"/*
+   ```
+   
+   **Windows**:
+   ```cmd
+   # Check if tools exist
+   dir "%FLAIR_DIR%"
+   # Ensure no spaces in path cause issues - use quotes
+   set FLAIR_DIR="C:\Program Files\IDA Professional 9.1\tools\flair"
+   ```
+   
+   **Common IDA Pro installation paths**:
+   - macOS: `/Applications/IDA Professional 9.1.app/Contents/MacOS/tools/flair`
+   - Windows: `C:\Program Files\IDA Professional 9.1\tools\flair`
+   - Linux: `/opt/ida-pro/tools/flair` or `~/ida-pro/tools/flair`
 
 2. **Rust compilation fails**:
    - Verify Rust 1.84.1 is installed: `rustc --version`
@@ -425,6 +488,24 @@ This will:
 - Preserve all temporary files
 - Log every step of the process
 - Provide full stack traces on errors
+
+## Platform-Specific Notes
+
+### Windows
+- **Path separators**: Use forward slashes or escape backslashes in paths
+- **PowerShell vs CMD**: PowerShell is recommended for better Unicode support
+- **Antivirus**: Some antivirus software may interfere with RLIB extraction
+- **Long paths**: Enable long path support if encountering path length issues
+
+### Linux
+- **Dependencies**: Install `build-essential` and `pkg-config` if not already present
+- **Permissions**: Ensure execute permissions on FLAIR tools after installation
+- **Wine compatibility**: IDA Pro running under Wine may work but is not officially supported
+
+### macOS
+- **Gatekeeper**: You may need to allow IDA Pro tools through System Preferences > Security
+- **Homebrew**: Consider using Homebrew to manage Rust installation
+- **Apple Silicon**: Use Rosetta 2 if running IDA Pro x86_64 version on M1/M2 Macs
 
 ## Real-World Applications
 
