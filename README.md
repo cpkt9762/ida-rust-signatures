@@ -70,27 +70,21 @@ python -m src.cli.main generate-enhanced path/to/lib.rlib \
   --version 1.0.0 \
   --version-tag
 
-# Generate Solana SDK signatures
+# Generate signatures for a popular Rust crate
 python -m src.cli.main generate-enhanced \
-  data/dependencies/solana-sdk-2.1.21/target/x86_64-unknown-linux-gnu/release/libsolana_sdk.rlib \
-  --lib-name solana_sdk \
-  --version 2.1.21 \
+  /path/to/target/release/deps/libserde-*.rlib \
+  --lib-name serde \
+  --version 1.0.210 \
   --version-tag
 ```
 
-#### Auto-generate Solana Libraries
-```bash
-# Generate all Solana libraries with collision-aware generator
-python -m src.cli.main auto-generate-solana
-```
-
-#### Generate Signatures for Custom Crates
+#### Generate Signatures for Popular Crates
 ```bash
 # Basic generation with collision handling
-python -m src.cli.main generate serde tokio --version 1.0 --version-tag
+python -m src.cli.main generate serde tokio clap --version 1.0 --version-tag
 
 # Advanced generation with specific options
-python -m src.cli.main generate my-crate \
+python -m src.cli.main generate reqwest \
   --generator collision-aware \
   --demangle \
   --prevent-collisions \
@@ -108,14 +102,14 @@ python -m src.cli.main batch-generate \
 # Process specific pattern
 python -m src.cli.main batch-generate \
   -d ./libs \
-  -p "solana*.rlib" \
+  -p "lib*.rlib" \
   --version-tag
 ```
 
 #### Analysis and Validation
 ```bash
-# Validate signatures with detailed analysis
-python -m src.cli.main validate data/signatures/pat/solana_sdk_2.1.21.pat
+# Validate signatures with detailed analysis  
+python -m src.cli.main validate data/signatures/pat/serde_1.0.210.pat
 
 # Analyze and fix collisions
 python -m src.cli.main analyze-collisions signatures.pat --fix
@@ -255,16 +249,6 @@ Options:
   --multi-pass / --single-pass     Enable multi-pass optimization (default: True)
 ```
 
-#### `auto-generate-solana` - Automated Solana Processing
-```bash
-python -m src.cli.main auto-generate-solana [--config PATH]
-
-Features:
-- Automatically processes all three Solana libraries
-- Uses collision-aware generator by default
-- Generates separate versioned signatures for each library
-- Includes full dependency resolution and compilation
-```
 
 ### Analysis Commands
 
@@ -348,10 +332,10 @@ done
 ### Custom Build Options
 
 ```bash
-python -m src.cli.main generate solana-sdk \
-    --version 2.1 \
+python -m src.cli.main generate tokio \
+    --version 1.0 \
     --target x86_64-unknown-linux-gnu \
-    --lib-name solana_core \
+    --lib-name tokio_runtime \
     --keep-temp
 ```
 
@@ -364,7 +348,7 @@ python -m src.cli.main -v generate serde
 
 Keep temporary files for inspection:
 ```bash
-python -m src.cli.main generate tokio --keep-temp
+python -m src.cli.main generate reqwest --keep-temp
 ```
 
 Clean up old artifacts:
@@ -433,7 +417,7 @@ pytest --cov=src --cov-report=html  # Coverage report
 Enable comprehensive debugging:
 ```bash
 export LOG_LEVEL=DEBUG
-python -m src.cli.main -v generate solana-sdk --keep-temp
+python -m src.cli.main -v generate tokio --keep-temp
 ```
 
 This will:
@@ -441,6 +425,36 @@ This will:
 - Preserve all temporary files
 - Log every step of the process
 - Provide full stack traces on errors
+
+## Real-World Applications
+
+### Blockchain and DeFi Analysis
+```bash
+# Generate signatures for Solana ecosystem libraries
+python -m src.cli.main generate solana-sdk solana-client --version 2.1.21
+python -m src.cli.main generate-enhanced solana-account-decoder.rlib --lib-name solana_decoder
+
+# Analyze Jupiter DEX protocol
+python -m src.cli.main generate jupiter-amm-interface --version 0.4.6
+```
+
+### Web Development
+```bash
+# Popular web frameworks
+python -m src.cli.main generate actix-web rocket --version-tag
+
+# HTTP clients and serialization
+python -m src.cli.main generate reqwest serde_json --version-tag
+```
+
+### Systems Programming
+```bash
+# Async runtime and utilities
+python -m src.cli.main generate tokio async-std --version-tag
+
+# CLI and configuration libraries
+python -m src.cli.main generate clap config --version-tag
+```
 
 ## Contributing
 
