@@ -1,0 +1,125 @@
+# Solana eBPF Configuration
+# Configuration for Solana eBPF signature generation
+
+platform: "solana_ebpf"
+target_architecture: "sbf-solana-solana"
+
+# Solana toolchain settings
+solana:
+  # Default toolchain version for testing
+  default_version: "1.18.16"
+  
+  # Supported Solana versions
+  supported_versions:
+    - "1.18.16"
+    - "1.18.26" 
+    - "2.1.21"
+  
+  # Target crate for testing
+  test_crate:
+    name: "solana-program"
+    version: "1.18.16"
+  
+  # Toolchain directory (relative to data directory)
+  toolchain_dir: "solana_ebpf/toolchains"
+
+# Signature generation settings
+signature_generation:
+  # Primary strategy: Use ported algorithms from solana-ida-signatures-factory
+  strategies:
+    - "solana_pat_generator"    # Main strategy: Direct port of flair-preprocessor.py
+    - "flair_adapter"           # Backup: Try to adapt FLAIR tools
+  
+  # Output directories
+  output:
+    pat_dir: "solana_ebpf/signatures/pat"
+    sig_dir: "solana_ebpf/signatures/sig" 
+    rlibs_dir: "solana_ebpf/rlibs"
+    crates_dir: "solana_ebpf/crates"
+    
+    # IDA Pro signature installation directory
+    ida_sig_dir: "/Applications/IDA Professional 9.1.app/Contents/MacOS/sig/solana_ebpf"
+
+# Popular Solana ecosystem crates for batch processing
+crates:
+  # Core Solana libraries
+  solana_core:
+    - name: "solana-program"
+      versions: ["1.18.16", "1.18.26", "2.1.21"]
+    - name: "solana-sdk"
+      versions: ["1.18.16", "1.18.26", "2.1.21"]
+    - name: "solana-client"
+      versions: ["1.18.16", "1.18.26", "2.1.21"]
+  
+  # Anchor framework
+  anchor:
+    - name: "anchor-lang"
+      versions: ["0.29.0", "0.30.0", "0.30.1"]
+    - name: "anchor-spl"
+      versions: ["0.29.0", "0.30.0", "0.30.1"]
+  
+  # SPL libraries
+  spl:
+    - name: "spl-token"
+      versions: ["4.0.0", "5.0.0"]
+    - name: "spl-associated-token-account"
+      versions: ["2.3.0", "3.0.0"]
+
+# Processing settings
+processing:
+  # Function filtering
+  function_filters:
+    min_size: 35           # Minimum function size in bytes (from original)
+    max_size: 32768        # Maximum function size in bytes (0x8000 from original)
+    
+  # Pattern generation
+  pattern_generation:
+    enable_crc16: true           # Use CRC16 checksums (from original)
+    enable_version_tagging: true # Add version tags to functions
+    enable_deduplication: true   # Remove duplicate patterns
+    
+  # eBPF specific settings
+  ebpf:
+    instruction_size: 8          # eBPF instructions are 8 bytes
+    handle_relocations: true     # Process eBPF relocations
+    detect_syscalls: true        # Detect Solana syscalls
+
+# Logging and debugging
+logging:
+  level: "INFO"
+  enable_debug_functions: false  # Enable detailed function analysis logging
+  enable_performance_metrics: true
+
+# Testing configuration
+testing:
+  # Reference implementation for comparison
+  reference_implementation: "solana-ida-signatures-factory"
+  
+  # Enable comparison with original tool output
+  enable_comparison: true
+  
+  # Quality thresholds
+  quality_thresholds:
+    min_functions_extracted: 10      # Minimum functions to consider success
+    min_pattern_length: 64           # Minimum pattern length in hex chars
+    max_collision_rate: 0.05         # Maximum acceptable collision rate
+
+# Batch processing presets
+presets:
+  # Solana core development
+  solana_dev:
+    crates: ["solana-program", "solana-sdk"]
+    versions: ["1.18.16", "2.1.21"]
+    merge_versions: true
+    
+  # Anchor development
+  anchor_dev:
+    crates: ["anchor-lang", "anchor-spl"]
+    versions: ["0.30.0", "0.30.1"]
+    merge_versions: true
+    
+  # SPL token development
+  spl_dev:
+    crates: ["spl-token", "spl-associated-token-account"]
+    versions: ["4.0.0", "5.0.0"]
+    merge_versions: true

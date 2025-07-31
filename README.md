@@ -1,40 +1,63 @@
-# Rust x86_64 IDA Signatures Generator
+# 多平台 Rust IDA 签名生成套件 | Multi-Platform Rust IDA Signature Generator
 
-A comprehensive tool for generating IDA FLIRT signatures and .til type libraries from Rust libraries, designed for reverse engineering analysis of x86_64 binaries.
+A comprehensive multi-platform toolkit for generating IDA Pro FLIRT signatures and .til type libraries from Rust libraries, supporting both traditional x86_64 and modern Solana eBPF architectures for complete reverse engineering analysis.
 
-## Features
+## 🌟 核心特性 | Core Features
 
-- **IDA .til类型库生成**: 从RLIB文件直接生成IDA Pro兼容的类型信息库文件
+### 🏗️ 多平台架构支持 | Multi-Platform Architecture
+- **x86_64 平台**: 传统 Rust 库的 FLIRT 签名和类型库生成
+- **Solana eBPF 平台**: Solana 区块链生态的 eBPF 格式签名生成
+- **统一 CLI 接口**: 通过平台命名空间区分不同架构
+- **独立模块设计**: 每个平台拥有独立的构建、提取、生成管线
+
+### 🎯 Solana eBPF 平台特性
+- **Solana 工具链管理**: 自动下载和管理多版本 (1.18.16, 1.18.26, 2.1.21)
+- **eBPF 编译器集成**: cargo-build-sbf 集成，生成 eBPF rlib 格式
+- **完整算法移植**: 忠实移植 solana-ida-signatures-factory 核心算法
+- **版本合并器**: 智能去重，版本范围命名，避免签名冲突
+- **文件命名规范**: `name_version.ebpf.pat/sig` 格式，支持版本管理
+
+### 🛡️ 智能碰撞处理系统
+- **多种处理模式**: strict, accept, force, manual 四种模式
+- **智能函数选择**: 优先非 `unlikely.` 函数，选择名称更短的版本
+- **EXC 文件优化**: 使用 `+` 前缀标记最佳函数，删除其他碰撞
+- **自动碰撞解析**: 显著减少手动干预，提高签名质量
+
+### 📘 TIL 类型库生成
+- **x86_64 DWARF 提取**: 从 RLIB 文件直接生成 IDA Pro 兼容的类型信息库
+- **eBPF Fallback 机制**: 解决 eBPF DWARF 重定位类型兼容性问题
+- **基础类型库**: 预定义 Solana 程序基本类型 (SolanaPubkey, AccountInfo 等)
 - **手动重编译控制**: 三种用户指定的重编译方法，无自动检测干扰
-- **Automatic Rust Compilation**: Compiles Rust crates with optimized settings for signature generation
-- **Collision-Aware Generation**: Intelligent collision prevention and resolution for high-quality signatures
-- **Rust Name Demangling**: Integrated rust-demangler for readable function names in signatures
-- **Version Tagging**: Automatic version tagging to prevent cross-version collisions
-- **Dual Signature Generation**: Primary approach using IDA FLAIR tools, with enhanced custom implementation
-- **Batch Processing**: Process multiple RLIB files simultaneously with progress tracking
-- **Comprehensive Dependency Management**: Handles complex Rust dependency trees and version resolution
-- **x86_64 Optimization**: Specifically tuned for x86_64-unknown-linux-gnu target architecture
-- **Enhanced CLI Interface**: User-friendly command-line interface with advanced options and detailed statistics
-- **Configuration Management**: Flexible YAML-based configuration system
-- **Caching & Performance**: Built-in caching to avoid redundant compilation and extraction
 
-## Quick Start
+### ⚙️ 高级功能
+- **YAML 配置系统**: 灵活的批量处理配置，支持工具链版本映射
+- **版本标记**: 自动版本标记防止跨版本碰撞
+- **Rust 名称还原**: 集成 rust-demangler，签名中显示可读函数名
+- **批量处理**: 多 RLIB 文件同时处理，进度跟踪
+- **缓存优化**: 内置缓存避免重复编译和提取
 
-### Installation
+## 🚀 快速开始 | Quick Start
 
-1. **Install Rust 1.84.1**:
+### 📦 安装配置 | Installation
+
+#### 1. 安装 Rust 工具链 | Install Rust Toolchain
 ```bash
+# 安装 Rust 1.84.1 (用于 x86_64 平台)
 rustup install 1.84.1
 rustup default 1.84.1
 rustup target add x86_64-unknown-linux-gnu
+
+# 安装 Solana 兼容的 Rust 版本 (用于 eBPF 平台)
+rustup install 1.75.0
+rustup install 1.79.0
 ```
 
-2. **Install Python dependencies**:
+#### 2. 安装 Python 依赖 | Install Python Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-3. **Configure IDA FLAIR tools path**:
+#### 3. 配置 IDA FLAIR 工具路径 | Configure IDA FLAIR Tools Path
 
 **macOS**:
 ```bash
@@ -58,9 +81,36 @@ export FLAIR_DIR="/opt/ida-pro/tools/flair"
 export FLAIR_DIR="$HOME/ida-pro/tools/flair"
 ```
 
-### Basic Usage
+### 🎯 基本使用 | Basic Usage
 
-#### Generate IDA .til Type Libraries (Recommended)
+#### 🌐 Solana eBPF 平台使用 | Solana eBPF Platform Usage
+
+```bash
+# 1. 设置 Solana 工具链 | Setup Solana Toolchain
+python -m src.cli.main solana setup-toolchain --version 1.18.16
+
+# 2. 编译 solana-program crate | Compile solana-program crate
+python -m src.cli.main solana compile-solana-program --version 1.18.16
+
+# 3. 生成 PAT 文件 | Generate PAT file
+python -m src.cli.main solana generate-pat --version 1.18.16
+
+# 4. 生成 SIG 文件 | Generate SIG file  
+python -m src.cli.main solana generate-sig --version 1.18.16
+
+# 5. 生成 TIL 文件 (实验性) | Generate TIL file (Experimental)
+python -m src.cli.main solana generate-til --version 1.18.16
+
+# 6. 测试完整工作流 | Test complete workflow
+python -m src.cli.main solana test-workflow --version 1.18.16
+
+# 7. 合并多版本签名 | Merge multi-version signatures
+python -m src.cli.main solana merge-versions --versions 1.18.16,1.18.26,2.1.21
+```
+
+#### 📘 x86_64 平台使用 | x86_64 Platform Usage
+
+##### Generate IDA .til Type Libraries (Recommended)
 ```bash
 # Generate .til file from RLIB with manual recompilation control
 python -m src.cli.main generate-til path/to/lib.rlib \
@@ -153,31 +203,52 @@ python -m src.cli.main info
 Rust Crates → Cargo Build → .rlib Files → Object Extraction → FLAIR Tools → IDA Signatures
 ```
 
-### Directory Structure
+### 🏗️ 多平台架构 | Multi-Platform Architecture
+
+```
+多平台 Rust IDA 签名生成套件 v2.0
+├── x86_64 Platform          # 传统 x86_64 架构支持
+│   ├── FLIRT 签名生成        # 标准 FLIRT 工具集成
+│   ├── TIL 类型库生成        # DWARF 调试信息提取
+│   └── 碰撞处理系统          # 智能碰撞解决
+└── Solana eBPF Platform     # Solana 区块链架构支持  
+    ├── eBPF 签名生成         # 专用 eBPF 算法移植
+    ├── TIL Fallback 机制     # 兼容性后备方案
+    └── 版本合并系统          # 多版本智能合并
+```
+
+### 📁 目录结构 | Directory Structure
 
 ```
 rust-x86_64-ida-signatures/
-├── src/                     # Source code
-│   ├── core/               # Configuration, logging, exceptions
-│   ├── builders/           # Rust compilation and dependency resolution
-│   ├── extractors/         # RLIB archive and object file extraction
-│   ├── generators/         # Signature generation (enhanced generators)
-│   └── cli/                # Enhanced command-line interface
-├── data/                    # Working data
-│   ├── projects/           # Rust project workspaces
-│   ├── compiled/           # Build artifacts
-│   ├── dependencies/       # Downloaded Rust crates
-│   ├── headers/            # Generated C++ header files for .til generation
-│   └── signatures/         # Generated signatures (organized by type)
-│       ├── pat/            # PAT signature files
-│       ├── sig/            # SIG signature files
-│       ├── temp_objects/   # Temporary object files
-│       └── rust_1_84_1_debug/  # Test RLIB files
-│           ├── libcore-96580b7e4b81524a.rlib    # Rust Core library
-│           ├── libstd-256c50b86215d2e7.rlib     # Rust Std library
-│           └── liballoc-d67f1c7e30eebbd7.rlib   # Rust Alloc library
-├── configs/                # Configuration files
-└── logs/                   # Application logs
+├── src/                      # 源代码 | Source code
+│   ├── core/                # 核心功能：配置、日志、异常
+│   ├── builders/            # x86_64 构建器：编译和依赖解析
+│   ├── extractors/          # x86_64 提取器：RLIB 和对象文件提取
+│   ├── generators/          # x86_64 生成器：签名生成
+│   ├── platforms/           # 🌐 多平台支持
+│   │   └── solana_ebpf/     # Solana eBPF 平台实现
+│   │       ├── builders/    # eBPF 构建器 (工具链管理、编译器)
+│   │       ├── extractors/  # eBPF 提取器 (ELF 分析、函数提取)
+│   │       ├── generators/  # eBPF 生成器 (PAT/SIG/TIL)
+│   │       └── constants/   # eBPF 常量 (操作码、重定位、系统调用)
+│   └── cli/                 # 统一命令行界面
+├── data/                     # 工作数据
+│   ├── signatures/          # x86_64 签名文件
+│   ├── headers/             # x86_64 C++ 头文件 (.til 输入)
+│   └── solana_ebpf/         # 🌐 Solana eBPF 数据目录
+│       ├── toolchains/      # Solana 工具链存储
+│       ├── crates/          # 编译的 crate 项目
+│       ├── rlibs/           # eBPF rlib 文件
+│       ├── headers/         # eBPF C++ 头文件
+│       └── signatures/      # Solana 签名文件
+│           ├── pat/         # .ebpf.pat 文件
+│           └── sig/         # .ebpf.sig 文件
+├── configs/                  # 配置文件
+│   ├── solana_ebpf.yaml     # 🌐 Solana eBPF 配置
+│   └── batch_libraries.yaml # 批量处理配置示例
+└── tests/                    # 测试目录
+    └── test_solana_integration.py  # 🧪 Solana 集成测试
 ```
 
 ## Configuration
@@ -537,13 +608,37 @@ python -m src.cli.main generate tokio async-std --version-tag
 python -m src.cli.main generate clap config --version-tag
 ```
 
-## Contributing
+## ⚠️ 技术限制 | Technical Limitations
 
-1. Follow the established code style and architecture patterns
-2. Ensure all tests pass and coverage remains above 85%
-3. Update documentation for any new features
-4. Use descriptive commit messages
+### 🌐 Solana eBPF 平台限制
+- **DWARF 调试信息兼容性**: Solana eBPF 的 DWARF 调试信息使用了不同的重定位类型，标准 GNU binutils 工具（readelf、objdump 等）无法正确处理 eBPF 的重定位类型
+- **类型提取限制**: RustTypeExtractor 无法正确解析 eBPF 的 DWARF 信息，因此 TIL 生成使用 fallback 机制
+- **Fallback 解决方案**: 实现了预定义的 Solana 基本类型库，包含 `SolanaPubkey`、`SolanaAccountInfo` 等核心类型
+- **IDAClang 兼容性**: IDAClang 不支持 `sbf-solana-solana` 目标架构，需要使用兼容架构生成 TIL 文件
 
-## License
+### 📈 架构演进历程 | Architecture Evolution
 
-This project is developed for reverse engineering research and analysis purposes.
+#### v1.0 → v2.0 重大升级
+- **架构升级**: 从单一 x86_64 平台升级为多平台架构
+- **平台扩展**: 新增完整的 Solana eBPF 平台支持
+- **碰撞处理优化**: 实现智能碰撞处理系统，显著减少手动干预
+- **配置系统改进**: 引入 YAML 配置文件，支持批量处理和工具链版本映射
+- **TIL 生成增强**: 添加 fallback 机制，提高跨平台兼容性
+
+#### 未来发展方向
+- 改进 eBPF DWARF 解析器，支持 eBPF 特有的重定位类型
+- 扩展到更多区块链平台 (Ethereum WASM, Cosmos, etc.)
+- 增强 TIL 生成的类型覆盖率
+- 优化批量处理性能
+
+## 🤝 贡献指南 | Contributing
+
+1. 遵循已建立的代码风格和架构模式
+2. 确保所有测试通过，覆盖率保持在 85% 以上
+3. 为任何新功能更新文档
+4. 使用描述性的提交信息
+5. 多平台功能需要在相应的 `src/platforms/` 目录下实现
+
+## 📄 开源许可 | License
+
+本项目专为逆向工程研究和分析目的而开发。

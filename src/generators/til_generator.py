@@ -23,14 +23,19 @@ class TilGeneratorConfig:
         
         # IDA Pro standard paths
         self.ida_til_dir = "/Applications/IDA Professional 9.1.app/Contents/MacOS/til/rust"
+        self.ida_til_dir_ebpf = "/Applications/IDA Professional 9.1.app/Contents/MacOS/til/ebpf"
         
         # Compilation targets
         self.default_target = "x86_64-unknown-linux-gnu"
         self.target_suffix_map = {
             "x86_64-unknown-linux-gnu": "gnulnx_x64",
             "x86_64-pc-windows-gnu": "win64_x64",
-            "x86_64-apple-darwin": "darwin_x64"
+            "x86_64-apple-darwin": "darwin_x64",
+            "sbf-solana-solana": "ebpf"  # Solana eBPF target
         }
+        
+        # eBPF specific targets
+        self.ebpf_targets = ["sbf-solana-solana"]
 
 
 class TilGenerator(LoggerMixin):
@@ -227,25 +232,36 @@ class TilGenerator(LoggerMixin):
         target = target or self.config.default_target
         target_suffix = self.config.target_suffix_map.get(target, "unknown")
         
-        # Generate .til filename following IDA conventions with version
-        # Convert version to filename-safe format (replace dots and dashes with underscores)
-        version_safe = lib_version.replace('.', '_').replace('-', '_')
-        til_filename = f"rust_{lib_name}_v{version_safe}_{target_suffix}.til"
-        til_path = Path(self.config.ida_til_dir) / til_filename
+        # Handle eBPF targets differently
+        if target in self.config.ebpf_targets:
+            # eBPF uses simpler naming convention
+            til_filename = f"{lib_name}_{lib_version}_ebpf.til"
+            til_dir = Path(self.config.ida_til_dir_ebpf)
+        else:
+            # Standard x86_64 naming convention
+            # Convert version to filename-safe format (replace dots and dashes with underscores)
+            version_safe = lib_version.replace('.', '_').replace('-', '_')
+            til_filename = f"rust_{lib_name}_v{version_safe}_{target_suffix}.til"
+            til_dir = Path(self.config.ida_til_dir)
+        
+        til_path = til_dir / til_filename
         
         # Ensure IDA til directory exists
         try:
-            til_path.parent.mkdir(parents=True, exist_ok=True)
+            til_dir.mkdir(parents=True, exist_ok=True)
             
             # Test write permissions
-            test_file = til_path.parent / ".write_test"
+            test_file = til_dir / ".write_test"
             test_file.touch()
             test_file.unlink()
             
         except PermissionError:
-            self.logger.warning(f"No write permission to IDA til directory: {til_path.parent}")
+            self.logger.warning(f"No write permission to IDA til directory: {til_dir}")
             # Fallback to project data directory
-            fallback_dir = Path(settings.output_dir) / "til"
+            if target in self.config.ebpf_targets:
+                fallback_dir = Path(settings.output_dir) / "solana_ebpf" / "til"
+            else:
+                fallback_dir = Path(settings.output_dir) / "til"
             fallback_dir.mkdir(parents=True, exist_ok=True)
             til_path = fallback_dir / til_filename
             self.logger.info(f"Using fallback location: {til_path}")

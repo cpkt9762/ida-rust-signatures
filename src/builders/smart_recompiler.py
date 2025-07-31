@@ -16,6 +16,7 @@ from ..core.exceptions import BuildError, ValidationError
 from ..extractors.debug_info_checker import (
     DebugInfoReport, RlibSourceInfo, ProjectStructureAnalysis, RecompileOption
 )
+from .rlib_manager import X86_64RlibManager
 
 
 class RecompileResult:
@@ -37,6 +38,7 @@ class SmartRecompiler(LoggerMixin):
     def __init__(self):
         super().__init__()
         self.supported_methods = ['env_vars', 'config_file', 'cli_system']
+        self.rlib_manager = X86_64RlibManager()
     
     def recompile_rlib(
         self, 
@@ -423,7 +425,81 @@ opt-level = 0
         # 返回最新的文件
         latest_file = max(all_files, key=lambda x: x.stat().st_mtime)
         self.logger.debug(f"Selected latest RLIB file: {latest_file}")
-        return latest_file
+        
+        # 组织RLIB文件到标准位置和命名
+        organized_rlib = self._organize_generated_rlib(latest_file, source_info)
+        return organized_rlib or latest_file  # 如果组织失败，返回原始文件
+    
+    def _organize_generated_rlib(self, rlib_path: Path, source_info: RlibSourceInfo) -> Optional[Path]:
+        """组织生成的RLIB文件到标准命名和位置.
+        
+        Args:
+            rlib_path: 生成的RLIB文件路径
+            source_info: RLIB源信息
+            
+        Returns:
+            组织后的RLIB文件路径，如果失败返回None
+        """
+        try:
+            # 确定库名和版本
+            library_name = source_info.crate_name.replace('-', '_')
+            version = getattr(source_info, 'version', None) or self._extract_version_from_original_rlib(rlib_path)
+            
+            if not version:
+                # 如果无法确定版本，使用时间戳作为版本
+                import time
+                version = f"dev_{int(time.time())}"
+                self.logger.warning(f"No version info available for {library_name}, using timestamp: {version}")
+            
+            # 使用RLIB管理器组织文件
+            organized_path = self.rlib_manager.organize_rlib(
+                rlib_path, 
+                library_name, 
+                version,
+                source_info.crate_name  # 原始crate名用于目录组织
+            )
+            
+            self.logger.info(f"Organized RLIB: {rlib_path.name} -> {organized_path.name}")
+            return organized_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to organize RLIB {rlib_path}: {e}")
+            return None
+    
+    def _extract_version_from_original_rlib(self, rlib_path: Path) -> Optional[str]:
+        """尝试从RLIB文件名或路径中提取版本信息.
+        
+        Args:
+            rlib_path: RLIB文件路径
+            
+        Returns:
+            提取的版本字符串，如果无法提取返回None
+        """
+        # 尝试从路径中查找版本信息
+        path_parts = str(rlib_path).split('/')
+        
+        # 检查路径中是否包含版本信息（如 target/release, target/debug等）
+        for part in path_parts:
+            if part.startswith('rust-') and len(part) > 5:
+                # 如果路径包含rust-1.75.0这样的信息
+                potential_version = part[5:]  # 去掉'rust-'前缀
+                if '.' in potential_version:
+                    return potential_version
+        
+        # 尝试从环境变量获取Rust版本
+        try:
+            import subprocess
+            result = subprocess.run(['rustc', '--version'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                # 输出格式类似: rustc 1.75.0 (82e1608df 2023-12-21)
+                parts = result.stdout.split()
+                if len(parts) >= 2:
+                    return parts[1]  # 版本号
+        except Exception:
+            pass
+        
+        # 默认返回unknown
+        return "unknown"
     
     def _verify_recompile_result(self, original_rlib_path: Path, result: RecompileResult):
         """验证重编译结果质量."""

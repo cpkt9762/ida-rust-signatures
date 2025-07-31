@@ -1,0 +1,601 @@
+# Batch Libraries Configuration
+# 批量库签名生成统一配置文件 - 完整的多平台多版本支持
+project_name: "rust_libraries_batch"
+description: "Multi-platform Rust libraries signature generation with sub-library architecture"
+
+# 配置文件验证设置
+config_validation:
+  strict_references: true      # 严格检查所有引用
+  auto_resolve_missing: false  # 不自动解析缺失的引用
+  fail_on_missing: true        # 遇到缺失引用时失败
+  validate_sub_libraries: true      # 验证子库引用
+  fail_on_unknown_sub_library: true # 遇到未知子库时失败
+  auto_suggest_similar: true        # 自动建议相似的子库名
+  version: "1.0"              # 配置文件版本
+
+# 全局子库定义（简化的映射关系）
+global_sub_library_definitions:
+  rust_core_ebpf:
+    rust_component: "core"
+    description: "Rust Core Library (eBPF)"
+    output_prefix: "rust_core"
+  rust_std_ebpf:
+    rust_component: "std"
+    description: "Rust Standard Library (eBPF)"
+    output_prefix: "rust_std"
+  rust_alloc_ebpf:
+    rust_component: "alloc"
+    description: "Rust Alloc Library (eBPF)"
+    output_prefix: "rust_alloc"
+
+# 全局文件命名格式规范
+global_naming_format:
+  # 统一格式: {library_name}_{version}_{platform}.{extension}
+  pattern: "{library_name}_{version}_{platform}.{extension}"
+  
+  # 平台标识符
+  platform_identifiers:
+    x86_64: "x86_64"
+    solana_ebpf: "ebpf"
+  
+  # 扩展名映射
+  extensions:
+    rlib: "rlib"
+    pat: "pat"
+    sig: "sig"
+    til: "til"
+
+# 全局生成控制选项
+global_generation_control:
+  # 默认生成的文件类型
+  default_generate:
+    rlib: true      # 总是生成 RLIB (作为基础)
+    pat: true       # 默认生成 PAT
+    sig: false      # 默认不生成 SIG (可选)
+    til: false      # 默认不生成 TIL (可选)
+  
+  # 文件间的强制依赖关系
+  mandatory_dependencies:
+    sig: ["rlib", "pat"]    # SIG 路径: RLIB → PAT → SIG
+    til: ["rlib"]           # TIL 路径: RLIB(调试) → TIL
+    pat: ["rlib"]           # PAT 路径: RLIB → PAT
+  
+  # 编译模式自动选择
+  compilation_mode_selection:
+    debug_required_for: ["til"]        # 只有 TIL 需要调试符号
+    release_sufficient_for: ["pat", "sig"]  # PAT/SIG 使用发布模式即可
+    
+    # 智能选择规则
+    selection_rules:
+      - condition: "til == true"
+        compilation_mode: "debug"       # 需要 TIL → 带调试符号的发布模式 (--debug 标志)
+        reason: "TIL generation requires debug symbols (cargo-build-sbf --debug)"
+      - condition: "til == false"
+        compilation_mode: "release"     # 不需要 TIL → 标准发布模式
+        reason: "PAT/SIG generation works with standard release build"
+
+# 全局默认 toolchain 配置 (最低优先级后备)
+default_toolchains:
+  x86_64:
+    rust_version: "stable"
+    rust_channel: "stable"
+    components: ["rustc", "cargo"]
+    targets: ["x86_64-unknown-linux-gnu"]
+  
+  solana_ebpf:
+    solana_version: "1.18.16"
+    rust_version: "1.75.0"
+    cargo_build_sbf_version: "1.18.16"
+
+# 编译配置模板
+compilation_templates:
+  debug_mode:
+    rustflags: ["-C", "debuginfo=2", "-C", "overflow-checks=on"]
+    cargo_profile: "release"  # Solana eBPF uses release profile with --debug flag
+    cargo_flags: ["--debug"]  # Key: --debug flag enables debug symbols in release build
+    description: "Release build with debug symbols for TIL generation (Solana eBPF)"
+  
+  release_mode:
+    rustflags: ["-C", "overflow-checks=on"]
+    cargo_profile: "release"
+    description: "Optimized release build for PAT/SIG generation"
+
+# Toolchain 预设 (支持命令行快速选择)
+toolchain_presets:
+  solana_1_18_16:
+    solana_version: "1.18.16"
+    rust_version: "1.75.0"
+    cargo_build_sbf_version: "1.18.16"
+    description: "Solana 1.18.16 stable release"
+    
+  solana_1_18_26:
+    solana_version: "1.18.26"
+    rust_version: "1.75.0"
+    cargo_build_sbf_version: "1.18.26"
+    description: "Solana 1.18.26 stable release"
+    
+  solana_latest:
+    solana_version: "2.1.21"
+    rust_version: "1.79.0"
+    cargo_build_sbf_version: "2.1.21"
+    description: "Latest Solana stable"
+    
+  solana_dev:
+    solana_version: "1.19.0-beta"
+    rust_version: "1.76.0"
+    cargo_build_sbf_version: "1.19.0-beta"
+    description: "Development/beta versions"
+
+# 全局生成选项
+global_generation_options:
+  collision_handling: "accept"           # 默认碰撞处理模式：accept/force/strict
+  collision_auto_fallback: true          # 自动尝试多种碰撞处理模式
+  collision_modes_order: ["accept", "force", "strict"]  # 碰撞处理模式优先级
+  enable_deduplication: true
+  enable_version_tagging: true
+  multi_pass_optimization: true
+  auto_cleanup: true
+
+# 全局输出目录
+global_output:
+  base_directory: "data"
+  temp_directory: "tmp"
+
+# 依赖库来源和编译方法定义
+crate_sources:
+  crates.io:
+    description: "Standard Rust package registry"
+    download_method: "cargo_download"
+    
+  rust_stdlib:
+    description: "Rust standard library components"
+    download_method: "rust_source"
+    compile_method: "std_library_extraction"
+    
+  git:
+    description: "Git repository source"
+    download_method: "git_clone"
+    
+  local:
+    description: "Local filesystem path"
+    download_method: "local_copy"
+
+# ============================================================================
+# 依赖库配置 - 主库与子库架构
+# ============================================================================
+
+libraries:
+  # ============================================================================
+  # 主库: Solana 生态库 - 定义 toolchain 标准
+  # ============================================================================
+  
+  solana_program_ebpf:
+    # 基本信息
+    crate_name: "solana-program"           # crates.io 上的实际库名
+    display_name: "Solana Program Library (eBPF) - Main Library"
+    library_type: "main"                   # 主库标识
+    
+    # 来源配置
+    crate_source: "crates.io"
+    compile_method: "normal_crate"
+    
+    # 主库推荐的 toolchain (会被子库继承，可被命令行覆盖)
+    recommended_toolchain:
+      solana_version: "1.18.16"
+      rust_version: "1.75.0"
+      cargo_build_sbf_version: "1.18.16"
+    
+    # 支持命令行覆盖的字段
+    toolchain_override_support:
+      solana_version: true
+      rust_version: true
+      cargo_build_sbf_version: true
+    
+    # 多版本配置 - 完整的版本矩阵
+    versions:
+      - version: "1.18.16"
+        generate:
+          rlib: true      # 会根据 til 需求自动选择编译模式
+          pat: true
+          sig: true
+          til: true       # 需要 TIL → 调试模式编译
+        # 使用库推荐的 toolchain
+        compilation_overrides:
+          debug_mode:
+            cargo_args: ["--target", "sbf-solana-solana", "--debug"]
+            profile: "release"  # Solana eBPF always uses release profile
+            environment:
+              CARGO_BUILD_SBF: "1"
+              CARGO_PROFILE_DEV_DEBUG: "true"
+              RUSTFLAGS: "-C debuginfo=2 -C overflow-checks=on"
+      
+      - version: "1.18.26"
+        generate:
+          rlib: true
+          pat: true
+          sig: true
+          til: false      # 不需要 TIL → 发布模式编译
+        # 版本特定 toolchain 覆盖
+        toolchain:
+          solana_version: "1.18.26"
+          rust_version: "1.75.0"
+          cargo_build_sbf_version: "1.18.26"
+      
+      - version: "2.1.21"
+        generate:
+          rlib: true
+          pat: true
+          sig: true
+          til: true       # 需要 TIL → 调试模式编译
+        # 版本特定 toolchain 覆盖
+        toolchain:
+          solana_version: "2.1.21"
+          rust_version: "1.79.0"
+          cargo_build_sbf_version: "2.1.21"
+        compilation_overrides:
+          debug_mode:
+            features: ["no-entrypoint"]  # v2.x 特有
+            cargo_args: ["--target", "sbf-solana-solana", "--debug"]
+            profile: "release"  # Solana eBPF always uses release profile  
+            environment:
+              CARGO_BUILD_SBF: "1"
+              CARGO_PROFILE_DEV_DEBUG: "true"
+              RUSTFLAGS: "-C debuginfo=2 -C overflow-checks=on"
+              SBF_OUT_DIR: "{output_dir}"
+    
+    platform: "solana_ebpf"
+    target: "sbf-solana-solana"
+    
+    # 通用编译配置
+    compilation:
+      release_mode:  # 不需要 TIL 时的默认配置
+        cargo_args: ["--target", "sbf-solana-solana"]
+        profile: "release"
+        environment:
+          CARGO_BUILD_SBF: "1"
+    
+    # 输出配置
+    outputs:
+      rlib: "solana_program_{version}_ebpf.rlib"
+      pat: "solana_program_{version}_ebpf.pat"
+      sig: "solana_program_{version}_ebpf.sig"
+      til: "solana_program_{version}_ebpf.til"
+      
+    output_dirs:
+      base: "solana_ebpf"
+      signatures: "solana_ebpf/signatures"
+      sig_files: "solana_ebpf/signatures"
+      rlibs: "solana_ebpf/rlibs"
+      til_files: "solana_ebpf/til"
+    
+    # 可用的子库列表（用于验证）
+    available_sub_libraries: ["rust_core_ebpf", "rust_std_ebpf", "rust_alloc_ebpf"]
+    
+    # 默认编译的子库
+    include_sub_libraries: ["rust_core_ebpf", "rust_std_ebpf", "rust_alloc_ebpf"]
+
+  # ============================================================================
+  # 独立库: Anchor 框架库 (非子库)  
+  # ============================================================================
+  
+  anchor_lang_ebpf:
+    # 基本信息
+    crate_name: "anchor-lang"              # crates.io 库名
+    display_name: "Anchor Language Framework (eBPF)"
+    library_type: "main"                   # 独立主库
+    
+    # 来源配置
+    crate_source: "crates.io"
+    compile_method: "normal_crate"
+    
+    # 自己的 toolchain 推荐
+    recommended_toolchain:
+      solana_version: "1.18.26"
+      rust_version: "1.75.0"
+      anchor_version: "0.30.0"
+    
+    # 支持命令行覆盖
+    toolchain_override_support:
+      solana_version: true
+      rust_version: true
+      anchor_version: true
+    
+    versions:
+      - version: "0.30.0"
+        generate:
+          rlib: true
+          pat: true
+          sig: true
+          til: true
+        # 使用库推荐的 toolchain
+        compilation_overrides:
+          debug_mode:
+            cargo_args: ["--target", "sbf-solana-solana"]
+            features: ["no-entrypoint"]
+            profile: "dev"
+            environment:
+              ANCHOR_LANG_VERSION: "0.30.0"
+              CARGO_PROFILE_DEV_DEBUG: "true"
+      
+      - version: "0.30.1"
+        generate:
+          rlib: true
+          pat: true
+          sig: true
+          til: false
+        # 版本特定覆盖
+        toolchain:
+          solana_version: "1.18.26"
+          rust_version: "1.75.0"
+          anchor_version: "0.30.1"
+    
+    platform: "solana_ebpf"
+    target: "sbf-solana-solana"
+    
+    compilation:
+      release_mode:
+        cargo_args: ["--target", "sbf-solana-solana"]
+        features: ["no-entrypoint"]
+        profile: "release"
+    
+    outputs:
+      rlib: "anchor_lang_{version}_ebpf.rlib"
+      pat: "anchor_lang_{version}_ebpf.pat"
+      sig: "anchor_lang_{version}_ebpf.sig"
+      til: "anchor_lang_{version}_ebpf.til"
+    output_dirs:
+      base: "solana_ebpf"
+      signatures: "solana_ebpf/signatures"
+      rlibs: "solana_ebpf/rlibs"
+      til_files: "solana_ebpf/til"
+
+# ============================================================================
+# Toolchain 继承规则说明
+# ============================================================================
+toolchain_inheritance_rules:
+  priority_order:
+    1: "命令行指定 (--solana-version, --rust-version 等) - 最高优先级"
+    2: "版本级别指定的 toolchain"
+    3: "从父库继承的 toolchain (子库专用)"
+    4: "库级别推荐的 toolchain (主库)"
+    5: "全局默认 toolchain (最低优先级)"
+  
+  inheritance_mechanism:
+    description: "子库自动继承父库的 toolchain 配置"
+    version_mapping: "通过 version_mapping 建立父子版本对应关系"
+    cli_override: "命令行参数会覆盖所有配置文件设置"
+    override_support: "子库可以在版本级别覆盖继承的 toolchain"
+  
+  examples:
+    cli_override_example:
+      command: "--solana-version 1.18.26 --rust-version 1.76.0"
+      effect: "所有库都使用指定的版本，覆盖配置文件设置"
+    
+    sub_library_example:
+      library: "rust_core_ebpf"
+      version: "1.75.0"
+      parent_library: "solana_program_ebpf"
+      parent_version: "1.18.16"
+      inherited_toolchain:
+        solana_version: "1.18.16"
+        rust_version: "1.75.0"
+        cargo_build_sbf_version: "1.18.16"
+
+# ============================================================================
+# 版本矩阵说明
+# ============================================================================
+version_matrix:
+  description: "完整的 Solana-Rust 版本对应关系"
+  
+  matrix_table:
+    solana_1_18_16:
+      solana_version: "1.18.16"
+      rust_version: "1.75.0"
+      rust_std_libs: ["rust_core_1.75.0", "rust_std_1.75.0", "rust_alloc_1.75.0"]
+      
+    solana_1_18_26:
+      solana_version: "1.18.26"  
+      rust_version: "1.75.0"
+      rust_std_libs: ["rust_core_1.75.0", "rust_std_1.75.0", "rust_alloc_1.75.0"]
+      note: "复用同一套 Rust 1.75.0 标准库"
+      
+    solana_2_1_21:
+      solana_version: "2.1.21"
+      rust_version: "1.79.0" 
+      rust_std_libs: ["rust_core_1.79.0", "rust_std_1.79.0", "rust_alloc_1.79.0"]
+
+# ============================================================================
+# IDA Pro 安装配置
+# ============================================================================
+ida_installation:
+  sig_directories:
+    x86_64: "/Applications/IDA Professional 9.1.app/Contents/MacOS/sig/pc/"
+    solana_ebpf: "/Applications/IDA Professional 9.1.app/Contents/MacOS/sig/solana_ebpf/"
+  til_directories:
+    x86_64: "/Applications/IDA Professional 9.1.app/Contents/MacOS/til/rust/"
+    solana_ebpf: "/Applications/IDA Professional 9.1.app/Contents/MacOS/til/ebpf/"
+
+# ============================================================================
+# 批处理预设 - 支持父子库联动
+# ============================================================================
+batch_presets:
+  # 完整的版本矩阵生成
+  solana_1_18_16_complete:
+    description: "Solana 1.18.16 + 对应的完整 Rust 1.75.0 标准库"
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["1.18.16"]
+        include_sub_libraries: true  # 自动包含所有子库
+    generate_override:
+      rlib: true
+      pat: true
+      sig: true
+      til: true
+    
+  solana_1_18_26_complete:
+    description: "Solana 1.18.26 + 对应的 Rust 1.75.0 标准库 (复用)"
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["1.18.26"]
+        include_sub_libraries: true
+    generate_override:
+      rlib: true
+      pat: true
+      sig: true
+      til: false  # 复用 1.75.0 的 TIL
+      
+  solana_2_1_21_complete:
+    description: "Solana 2.1.21 + 对应的 Rust 1.79.0 标准库"
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["2.1.21"]
+        include_sub_libraries: true
+    generate_override:
+      rlib: true
+      pat: true
+      sig: true
+      til: true
+    
+  all_versions_matrix:
+    description: "生成所有版本的完整矩阵"
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["1.18.16", "1.18.26", "2.1.21"]
+        include_sub_libraries: true
+    generate_override:
+      rlib: true
+      pat: true
+      sig: true
+      til: true
+    
+  # 只生成标准库子库
+  rust_std_only:
+    description: "只生成 Rust 标准库子库 (继承 Solana toolchain)"
+    validation: "strict"  # 严格验证子库引用
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["1.18.16", "2.1.21"]
+        include_sub_libraries: ["rust_core_ebpf", "rust_std_ebpf", "rust_alloc_ebpf"]
+    generate_override:
+      rlib: true
+      pat: true
+      sig: false
+      til: true
+    
+  # 签名文件生成 (不生成 TIL)
+  signatures_only:
+    description: "只生成签名文件 (RLIB → PAT → SIG，发布模式编译)"
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["1.18.16", "1.18.26", "2.1.21"]
+        include_sub_libraries: true
+      - library: "anchor_lang_ebpf"
+        versions: ["0.30.0", "0.30.1"]
+    generate_override:
+      rlib: true
+      pat: true
+      sig: true
+      til: false
+    
+  # 类型库生成 (不生成签名)
+  typelibs_only:
+    description: "只生成类型库文件 (RLIB → TIL，调试模式编译)"
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["1.18.16", "2.1.21"]
+        include_sub_libraries: true
+      - library: "anchor_lang_ebpf"
+        versions: ["0.30.0"]
+    generate_override:
+      rlib: true
+      pat: false
+      sig: false
+      til: true
+    
+  # 多库生态完整生成
+  multi_library_ecosystem:
+    description: "多库生态完整生成 (Solana + Anchor + Rust 标准库)"
+    libraries:
+      - library: "solana_program_ebpf"
+        versions: ["1.18.16", "2.1.21"]
+        include_sub_libraries: true
+      - library: "anchor_lang_ebpf"
+        versions: ["0.30.0"]
+    generate_override:
+      rlib: true
+      pat: true
+      sig: true
+      til: true
+
+# ============================================================================
+# 生成路径示例说明
+# ============================================================================
+generation_examples:
+  complete_signature_workflow:
+    description: "完整签名生成工作流"
+    steps:
+      1: "编译 RLIB 文件 (发布模式，用于 PAT/SIG)"  
+      2: "从 RLIB 生成 PAT 文件"
+      3: "从 PAT 生成 SIG 文件"
+    files: ["solana_program_1.18.16_ebpf.rlib", "solana_program_1.18.16_ebpf.pat", "solana_program_1.18.16_ebpf.sig"]
+    
+  typelib_workflow:
+    description: "类型库生成工作流 (独立路径)"
+    steps:
+      1: "编译带调试信息的 RLIB 文件 (调试模式)"
+      2: "从 RLIB 直接生成 TIL 文件"
+    files: ["solana_program_1.18.16_ebpf.rlib", "solana_program_1.18.16_ebpf.til"]
+    note: "TIL 生成不需要 PAT 文件"
+    
+  mixed_workflow:
+    description: "混合工作流 (两条路径并行)"
+    steps:
+      1: "编译带调试信息的 RLIB 文件 (调试模式)"
+      2a: "从 RLIB 生成 PAT 文件"
+      3a: "从 PAT 生成 SIG 文件"
+      2b: "从 RLIB 直接生成 TIL 文件"
+    files: ["solana_program_1.18.16_ebpf.rlib", "solana_program_1.18.16_ebpf.pat", "solana_program_1.18.16_ebpf.sig", "solana_program_1.18.16_ebpf.til"]
+    note: "签名路径和类型库路径相互独立，但 TIL 需要调试符号"
+    
+  rust_std_sub_library_example:
+    description: "Rust 标准库子库生成示例"
+    parent_library: "solana_program_ebpf@1.18.16"
+    sub_libraries:
+      - rust_core_1.75.0_ebpf.rlib/pat/sig/til
+      - rust_std_1.75.0_ebpf.rlib/pat/sig/til  
+      - rust_alloc_1.75.0_ebpf.rlib/pat/sig/til
+    note: "子库继承父库的 toolchain 配置"
+
+# ============================================================================
+# CLI 使用示例
+# ============================================================================
+cli_usage_examples:
+  basic_usage:
+    - description: "使用配置文件生成完整版本矩阵"
+      command: "python -m src.cli.main batch-generate --config configs/batch_libraries.yaml --preset all_versions_matrix"
+      
+    - description: "生成特定版本的 Solana + Rust 标准库"
+      command: "python -m src.cli.main batch-generate --config configs/batch_libraries.yaml --preset solana_1_18_16_complete"
+      
+    - description: "只生成签名文件 (不生成 TIL)"
+      command: "python -m src.cli.main batch-generate --config configs/batch_libraries.yaml --preset signatures_only"
+  
+  toolchain_override:
+    - description: "命令行指定 toolchain 版本 (覆盖配置文件)"
+      command: "python -m src.cli.main batch-generate --config configs/batch_libraries.yaml --library solana_program_ebpf --solana-version 1.18.16 --rust-version 1.75.0 --include-sub-libraries"
+      
+    - description: "使用预设 toolchain"
+      command: "python -m src.cli.main batch-generate --config configs/batch_libraries.yaml --toolchain-preset solana_latest --library solana_program_ebpf"
+      
+    - description: "测试不同 Rust 版本"
+      command: "python -m src.cli.main batch-generate --config configs/batch_libraries.yaml --library solana_program_ebpf --solana-version 2.1.21 --rust-version 1.80.0 --include-sub-libraries"
+  
+  single_library:
+    - description: "单独编译特定库"
+      command: "python -m src.cli.main compile-single --config configs/batch_libraries.yaml --library solana_program_ebpf --version 1.18.16"
+      
+    - description: "单独编译子库"
+      command: "python -m src.cli.main compile-single --config configs/batch_libraries.yaml --sub-library rust_core_ebpf --parent solana_program_ebpf@1.18.16"
+      
+    - description: "只生成 PAT 文件进行快速测试"
+      command: "python -m src.cli.main compile-single --library solana_program_ebpf --version 1.18.16 --generate-pat --no-generate-sig --no-generate-til"

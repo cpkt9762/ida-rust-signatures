@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     sigmake_path: Optional[Path] = None
     
     # Project directories
+    data_dir: Path = Field(Path("data"), env="DATA_DIR")
     workspace_dir: Path = Field(Path("data/projects"), env="WORKSPACE_DIR")
     cache_dir: Path = Field(Path("data/cache"), env="CACHE_DIR")
     output_dir: Path = Field(Path("data/signatures"), env="OUTPUT_DIR")

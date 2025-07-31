@@ -14,14 +14,23 @@ import yaml
 from ..builders.dependency_resolver import DependencyResolver, LocalDependencyManager
 from ..builders.rust_builder import RustBuilder
 from ..core.config import settings
-from ..core.exceptions import SignatureError
+from ..core.naming_utils import get_pat_filename, get_sig_filename, get_til_filename
+from ..core.exceptions import SignatureError, ConfigValidationError, SubLibraryNotFoundError
 from ..core.logger import setup_logging, get_logger
+from ..core.config_loader import ConfigLoader
 from ..extractors.rlib_extractor import RlibExtractor
 from ..generators.flair_generator import FLAIRGenerator
 from ..generators.custom_pat_generator import CustomPATGenerator
 from ..generators.enhanced_pat_generator import EnhancedPATGenerator
 from ..generators.collision_aware_generator import CollisionAwarePATGenerator, create_collision_aware_generator
 from ..collision_prevention import CollisionPrevention
+
+# Solana eBPF platform imports
+from ..platforms.solana_ebpf.builders.solana_toolchain import SolanaToolchainManager
+from ..platforms.solana_ebpf.builders.crate_compiler import SolanaProgramCompiler
+from ..platforms.solana_ebpf.builders.rlib_collector import RlibCollector
+from ..platforms.solana_ebpf.generators.solana_pat_generator import SolanaPATGenerator
+from ..platforms.solana_ebpf.generators.version_merger import SolanaVersionMerger
 
 
 @click.group()
@@ -238,8 +247,9 @@ def generate(ctx, crates: tuple, version: str, lib_name: Optional[str], keep_tem
                 use_short_names=True
             )
             # For custom generator, we need to process RLIB files directly
-            # This is a simplified implementation - would need adjustment for object files
-            result = {'pat': output_dir / f"{lib_name}.pat"}
+            # This is a simplified implementation - would need adjustment for object files  
+            pat_filename = get_pat_filename(lib_name, version, 'x86_64')
+            result = {'pat': output_dir / pat_filename}
             click.echo("⚠️  Custom generator requires RLIB input, not object files")
         elif generator == 'enhanced':
             gen = EnhancedPATGenerator(
@@ -247,7 +257,8 @@ def generate(ctx, crates: tuple, version: str, lib_name: Optional[str], keep_tem
                 use_short_names=True
             )
             # Enhanced generator also works with RLIB files
-            result = {'pat': output_dir / f"{lib_name}.pat"}
+            pat_filename = get_pat_filename(lib_name, version, 'x86_64')
+            result = {'pat': output_dir / pat_filename}
             click.echo("⚠️  Enhanced generator requires RLIB input, not object files")
         else:  # collision-aware
             # For collision-aware, we need to work with RLIB files
@@ -957,6 +968,511 @@ def batch_generate(rlib_dir: str, output_dir: Optional[str], version_tag: bool, 
 
 
 @cli.command()
+@click.option('--config', '-c', type=click.Path(exists=True), required=True, 
+              help='Configuration file path (batch_libraries.yaml)')
+@click.option('--preset', '-p', help='Batch preset name to use')
+@click.option('--library', '-l', help='Specific library to process')
+@click.option('--version', '-v', help='Specific version to process')
+@click.option('--solana-version', help='Override Solana toolchain version')
+@click.option('--rust-version', help='Override Rust toolchain version')
+@click.option('--include-sub-libraries/--no-sub-libraries', default=True,
+              help='Include sub-libraries in processing')
+@click.option('--validation-mode', type=click.Choice(['strict', 'lenient', 'auto']), 
+              default='strict', help='Configuration validation mode')
+@click.option('--dry-run', is_flag=True, help='Show what would be processed without executing')
+def batch_config_generate(config: str, preset: Optional[str], library: Optional[str], 
+                         version: Optional[str], solana_version: Optional[str], 
+                         rust_version: Optional[str], include_sub_libraries: bool,
+                         validation_mode: str, dry_run: bool):
+    """Generate signatures using YAML configuration file.
+    
+    Process libraries and sub-libraries based on configuration file settings
+    with support for toolchain overrides and batch presets.
+    
+    Examples:
+        # Use a specific preset
+        batch-config-generate -c configs/batch_libraries.yaml -p solana_1_18_16_complete
+        
+        # Process specific library with toolchain override
+        batch-config-generate -c configs/batch_libraries.yaml -l solana_program_ebpf -v 1.18.16 --solana-version 1.18.16
+        
+        # Dry run to see what would be processed
+        batch-config-generate -c configs/batch_libraries.yaml -p all_versions_matrix --dry-run
+    """
+    logger = get_logger(__name__)
+    
+    try:
+        # Load and validate configuration
+        config_loader = ConfigLoader(Path(config), validation_mode)
+        config_data = config_loader.load_config()
+        
+        click.echo(f"✅ Configuration loaded from {config}")
+        click.echo(f"📋 Validation mode: {validation_mode}")
+        
+        # Prepare toolchain overrides
+        toolchain_overrides = {}
+        if solana_version:
+            toolchain_overrides['solana_version'] = solana_version
+        if rust_version:
+            toolchain_overrides['rust_version'] = rust_version
+        
+        if toolchain_overrides:
+            click.echo(f"🔧 Toolchain overrides: {toolchain_overrides}")
+        
+        # Determine what to process
+        libraries_to_process = []
+        
+        if preset:
+            # Use batch preset
+            preset_config = config_loader.get_batch_preset(preset)
+            click.echo(f"📦 Using preset: {preset} - {preset_config.get('description', 'No description')}")
+            
+            # Get libraries from preset
+            preset_libraries = preset_config.get('libraries', [])
+            for lib_ref in preset_libraries:
+                if isinstance(lib_ref, dict):
+                    lib_name = lib_ref.get('library')
+                    lib_versions = lib_ref.get('versions', [])
+                    include_subs = lib_ref.get('include_sub_libraries', include_sub_libraries)
+                    
+                    for lib_version in lib_versions:
+                        libraries_to_process.append({
+                            'library': lib_name,
+                            'version': lib_version,
+                            'include_sub_libraries': include_subs
+                        })
+        
+        elif library:
+            # Process specific library
+            if version:
+                libraries_to_process.append({
+                    'library': library,
+                    'version': version,
+                    'include_sub_libraries': include_sub_libraries
+                })
+            else:
+                # Use all available versions
+                versions = config_loader.get_library_versions(library)
+                for lib_version in versions:
+                    libraries_to_process.append({
+                        'library': library,
+                        'version': lib_version,
+                        'include_sub_libraries': include_sub_libraries
+                    })
+        else:
+            click.echo("❌ Must specify either --preset or --library")
+            sys.exit(1)
+        
+        if not libraries_to_process:
+            click.echo("❌ No libraries to process")
+            sys.exit(1)
+        
+        click.echo(f"🎯 Processing {len(libraries_to_process)} library configurations")
+        
+        if dry_run:
+            click.echo("\n🔍 Dry run - showing what would be processed:")
+            for i, lib_config in enumerate(libraries_to_process, 1):
+                click.echo(f"  [{i}] {lib_config['library']} v{lib_config['version']}")
+                if lib_config['include_sub_libraries']:
+                    click.echo(f"      + Include sub-libraries")
+            click.echo("\n⚠️  Use without --dry-run to execute")
+            return
+        
+        # Process each library
+        success_count = 0
+        failed_count = 0
+        
+        for i, lib_config in enumerate(libraries_to_process, 1):
+            lib_name = lib_config['library']
+            lib_version = lib_config['version']
+            
+            click.echo(f"\n[{i}/{len(libraries_to_process)}] Processing {lib_name} v{lib_version}")
+            
+            try:
+                # Resolve library configuration with toolchain overrides
+                resolved_config = config_loader.resolve_library_configuration(
+                    lib_name, lib_version, toolchain_overrides
+                )
+                
+                # Determine platform and delegate to appropriate processor
+                platform = resolved_config.get('platform', 'x86_64')
+                
+                if platform == 'solana_ebpf':
+                    success = _process_solana_library(resolved_config, lib_name, lib_version)
+                else:
+                    success = _process_x86_64_library(resolved_config, lib_name, lib_version)
+                
+                if success:
+                    success_count += 1
+                    click.echo(f"  ✅ {lib_name} v{lib_version} completed")
+                else:
+                    failed_count += 1
+                    click.echo(f"  ❌ {lib_name} v{lib_version} failed")
+                    
+            except Exception as e:
+                failed_count += 1
+                click.echo(f"  ❌ {lib_name} v{lib_version} failed: {e}")
+                logger.error(f"Failed to process {lib_name} v{lib_version}: {e}")
+        
+        # Summary
+        click.echo(f"\n📊 Processing Summary:")
+        click.echo(f"✅ Success: {success_count}")
+        click.echo(f"❌ Failed: {failed_count}")
+        
+        if failed_count > 0:
+            sys.exit(1)
+            
+    except ConfigValidationError as e:
+        click.echo(f"❌ Configuration validation error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}")
+        logger.error(f"Batch config generate failed: {e}")
+        sys.exit(1)
+
+
+def _process_solana_library(config: Dict, lib_name: str, lib_version: str) -> bool:
+    """Process a Solana eBPF library configuration."""
+    logger = get_logger(__name__)
+    
+    try:
+        # Extract toolchain information
+        resolved_toolchain = config.get('resolved_toolchain', {})
+        solana_version = resolved_toolchain.get('solana_version', lib_version)
+        
+        # Initialize Solana toolchain and compiler
+        toolchain_manager = SolanaToolchainManager()
+        compiler = SolanaProgramCompiler(toolchain_manager)
+        
+        # Ensure toolchain is installed
+        if not toolchain_manager.is_toolchain_installed(solana_version):
+            click.echo(f"  📥 Installing Solana toolchain {solana_version}...")
+            toolchain_manager.install_toolchain(solana_version)
+        
+        # Compile RLIB
+        click.echo(f"  🔨 Compiling {lib_name} v{lib_version} to RLIB...")
+        crate_name = config.get('crate_name', lib_name.replace('_ebpf', ''))
+        rlib_path = compiler.compile_downloaded_crate(crate_name, lib_version, solana_version)
+        
+        # Generate PAT
+        click.echo(f"  📝 Generating PAT file...")
+        pat_generator = SolanaPATGenerator()
+        pat_path = pat_generator.generate_pat_from_rlib(rlib_path)
+        
+        # Generate SIG if configured
+        versions_config = config.get('versions', [])
+        current_version_config = None
+        for v in versions_config:
+            if v.get('version') == lib_version:
+                current_version_config = v
+                break
+        
+        if current_version_config and current_version_config.get('generate', {}).get('sig', False):
+            click.echo(f"  🔏 Generating SIG file...")
+            try:
+                from ..generators.flair_generator import FLAIRGenerator
+                flair_gen = FLAIRGenerator()
+                sig_output_path = pat_path.with_suffix('.sig')
+                
+                # Try multiple collision handling modes for better success rate
+                collision_modes = ['accept', 'force', 'strict']
+                sig_generated = False
+                
+                for mode in collision_modes:
+                    try:
+                        click.echo(f"    🔄 Trying collision mode: {mode}")
+                        result = flair_gen.generate_sig_with_collision_handling(
+                            pat_path, sig_output_path, lib_name, mode=mode
+                        )
+                        
+                        if result and result.get('success'):
+                            stats = result.get('stats', {})
+                            functions_included = stats.get('functions_included', 'unknown')
+                            functions_skipped = stats.get('functions_skipped', 0)
+                            collisions_detected = stats.get('collisions_detected', 0)
+                            
+                            click.echo(f"    ✅ SIG generated with {mode} mode")
+                            click.echo(f"    📊 Functions: {functions_included} included, {functions_skipped} skipped, {collisions_detected} collisions")
+                            click.echo(f"    ✅ SIG: {sig_output_path}")
+                            sig_generated = True
+                            break
+                    except Exception as mode_error:
+                        click.echo(f"    ⚠️  Mode {mode} failed: {mode_error}")
+                        continue
+                
+                if not sig_generated:
+                    logger.warning(f"SIG generation failed with all collision modes")
+                    click.echo(f"    ❌ SIG generation failed with all modes")
+                
+            except Exception as e:
+                logger.warning(f"SIG generation failed: {e}")
+                click.echo(f"    ❌ SIG generation failed: {e}")
+        
+        click.echo(f"    ✅ RLIB: {rlib_path}")
+        click.echo(f"    ✅ PAT: {pat_path}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to process Solana library {lib_name}: {e}")
+        return False
+
+
+def _process_x86_64_library(config: Dict, lib_name: str, lib_version: str) -> bool:
+    """Process an x86_64 library configuration."""
+    logger = get_logger(__name__)
+    
+    try:
+        # For now, this is a placeholder for x86_64 processing
+        # TODO: Implement x86_64 library processing based on config
+        click.echo(f"  ⚠️  x86_64 platform processing not yet implemented")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Failed to process x86_64 library {lib_name}: {e}")
+        return False
+
+
+@cli.command()
+@click.option('--config', '-c', type=click.Path(exists=True), required=True,
+              help='Configuration file path')
+@click.option('--library', '-l', required=True, help='Library name to compile')
+@click.option('--version', '-v', help='Specific version to compile')
+@click.option('--solana-version', help='Override Solana toolchain version')
+@click.option('--rust-version', help='Override Rust toolchain version')
+@click.option('--generate-rlib/--no-generate-rlib', default=True, help='Generate RLIB file')
+@click.option('--generate-pat/--no-generate-pat', default=True, help='Generate PAT file')
+@click.option('--generate-sig/--no-generate-sig', default=False, help='Generate SIG file')
+@click.option('--generate-til/--no-generate-til', default=False, help='Generate TIL file')
+@click.option('--cleanup/--no-cleanup', default=True, help='Clean up build artifacts')
+def compile_single(config: str, library: str, version: Optional[str], 
+                  solana_version: Optional[str], rust_version: Optional[str],
+                  generate_rlib: bool, generate_pat: bool, generate_sig: bool, 
+                  generate_til: bool, cleanup: bool):
+    """Compile a single library from configuration.
+    
+    Examples:
+        # Compile specific library version
+        compile-single -c configs/batch_libraries.yaml -l solana_program_ebpf -v 1.18.16
+        
+        # Override toolchain version
+        compile-single -c configs/batch_libraries.yaml -l solana_program_ebpf --solana-version 1.18.26
+        
+        # Generate only PAT file for testing
+        compile-single -l solana_program_ebpf -v 1.18.16 --generate-pat --no-generate-sig --no-generate-til
+    """
+    logger = get_logger(__name__)
+    
+    try:
+        # Load configuration
+        config_loader = ConfigLoader(Path(config), "strict")
+        config_data = config_loader.load_config()
+        
+        # Prepare toolchain overrides
+        toolchain_overrides = {}
+        if solana_version:
+            toolchain_overrides['solana_version'] = solana_version
+        if rust_version:
+            toolchain_overrides['rust_version'] = rust_version
+        
+        # Determine version to use
+        if not version:
+            available_versions = config_loader.get_library_versions(library)
+            if not available_versions:
+                click.echo(f"❌ No versions found for library '{library}'")
+                sys.exit(1)
+            version = available_versions[0]
+            click.echo(f"📌 Using version: {version}")
+        
+        # Resolve library configuration
+        resolved_config = config_loader.resolve_library_configuration(
+            library, version, toolchain_overrides
+        )
+        
+        click.echo(f"🎯 Compiling single library: {library} v{version}")
+        
+        # Determine platform
+        platform = resolved_config.get('platform', 'x86_64')
+        click.echo(f"🏗️  Platform: {platform}")
+        
+        if platform == 'solana_ebpf':
+            success = _compile_single_solana_library(
+                resolved_config, library, version, 
+                generate_rlib, generate_pat, generate_sig, generate_til, cleanup
+            )
+        else:
+            click.echo("⚠️  x86_64 platform not yet supported in single compile mode")
+            success = False
+        
+        if success:
+            click.echo(f"✅ {library} v{version} compilation completed successfully")
+        else:
+            click.echo(f"❌ {library} v{version} compilation failed")
+            sys.exit(1)
+            
+    except ConfigValidationError as e:
+        click.echo(f"❌ Configuration error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"❌ Compilation failed: {e}")
+        logger.error(f"Single compile failed: {e}")
+        sys.exit(1)
+
+
+def _compile_single_solana_library(config: Dict, lib_name: str, lib_version: str,
+                                  generate_rlib: bool, generate_pat: bool, 
+                                  generate_sig: bool, generate_til: bool, 
+                                  cleanup: bool) -> bool:
+    """Compile a single Solana library with specified generation options."""
+    logger = get_logger(__name__)
+    
+    try:
+        # Extract configuration
+        resolved_toolchain = config.get('resolved_toolchain', {})
+        solana_version = resolved_toolchain.get('solana_version', lib_version)
+        
+        click.echo(f"🔧 Using Solana toolchain: {solana_version}")
+        
+        # Initialize components
+        toolchain_manager = SolanaToolchainManager()
+        compiler = SolanaProgramCompiler(toolchain_manager)
+        
+        # Setup toolchain
+        if not toolchain_manager.is_toolchain_installed(solana_version):
+            click.echo(f"📥 Installing Solana toolchain {solana_version}...")
+            toolchain_manager.install_toolchain(solana_version)
+        
+        rlib_path = None
+        
+        if generate_rlib:
+            # Compile RLIB
+            click.echo(f"🔨 Compiling RLIB...")
+            crate_name = config.get('crate_name', lib_name.replace('_ebpf', ''))
+            rlib_path = compiler.compile_downloaded_crate(crate_name, lib_version, solana_version, cleanup)
+            click.echo(f"  ✅ RLIB: {rlib_path}")
+        
+        if generate_pat and rlib_path:
+            # Generate PAT
+            click.echo(f"📝 Generating PAT file...")
+            pat_generator = SolanaPATGenerator()
+            pat_path = pat_generator.generate_pat_from_rlib(rlib_path)
+            click.echo(f"  ✅ PAT: {pat_path}")
+            
+            if generate_sig:
+                # Generate SIG
+                click.echo(f"🔏 Generating SIG file...")
+                try:
+                    from ..generators.flair_generator import FLAIRGenerator
+                    flair_gen = FLAIRGenerator()
+                    sig_output_path = pat_path.with_suffix('.sig')
+                    
+                    # Try multiple collision handling modes for better success rate
+                    collision_modes = ['accept', 'force', 'strict']
+                    sig_generated = False
+                    
+                    for mode in collision_modes:
+                        try:
+                            click.echo(f"  🔄 Trying collision mode: {mode}")
+                            result = flair_gen.generate_sig_with_collision_handling(
+                                pat_path, sig_output_path, library, mode=mode
+                            )
+                            
+                            if result and result.get('success'):
+                                stats = result.get('stats', {})
+                                functions_included = stats.get('functions_included', 'unknown')
+                                functions_skipped = stats.get('functions_skipped', 0)
+                                collisions_detected = stats.get('collisions_detected', 0)
+                                
+                                click.echo(f"  ✅ SIG generated with {mode} mode")
+                                click.echo(f"  📊 Functions: {functions_included} included, {functions_skipped} skipped, {collisions_detected} collisions")
+                                click.echo(f"  ✅ SIG: {sig_output_path}")
+                                sig_generated = True
+                                break
+                        except Exception as mode_error:
+                            click.echo(f"  ⚠️  Mode {mode} failed: {mode_error}")
+                            continue
+                    
+                    if not sig_generated:
+                        logger.warning(f"SIG generation failed with all collision modes")
+                        click.echo(f"  ❌ SIG generation failed with all modes")
+                    
+                except Exception as e:
+                    click.echo(f"  ⚠️  SIG generation failed: {e}")
+                    logger.warning(f"SIG generation failed: {e}")
+        
+        if generate_til and rlib_path:
+            # TODO: Implement TIL generation for Solana eBPF
+            click.echo(f"⚠️  TIL generation for Solana eBPF not yet implemented")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to compile single Solana library {lib_name}: {e}")
+        return False
+
+
+@cli.command()
+@click.option('--config', '-c', type=click.Path(exists=True), required=True,
+              help='Configuration file path to validate')
+@click.option('--validation-mode', type=click.Choice(['strict', 'lenient', 'auto']), 
+              default='strict', help='Validation mode')
+def validate_config(config: str, validation_mode: str):
+    """Validate configuration file structure and references.
+    
+    Examples:
+        validate-config -c configs/batch_libraries.yaml
+        validate-config -c configs/batch_libraries.yaml --validation-mode lenient
+    """
+    logger = get_logger(__name__)
+    
+    try:
+        click.echo(f"🔍 Validating configuration: {config}")
+        click.echo(f"📋 Validation mode: {validation_mode}")
+        
+        # Load and validate configuration
+        config_loader = ConfigLoader(Path(config), validation_mode)
+        config_data = config_loader.load_config()
+        
+        # Display validation results
+        click.echo(f"✅ Configuration is valid!")
+        
+        # Show summary
+        libraries = config_data.get('libraries', {})
+        batch_presets = config_data.get('batch_presets', {})
+        
+        click.echo(f"\n📊 Configuration Summary:")
+        click.echo(f"   Libraries: {len(libraries)}")
+        click.echo(f"   Batch presets: {len(batch_presets)}")
+        
+        # Show libraries
+        if libraries:
+            click.echo(f"\n📚 Available Libraries:")
+            for lib_name, lib_config in libraries.items():
+                lib_type = lib_config.get('library_type', 'unknown')
+                platform = lib_config.get('platform', 'unknown')
+                versions = config_loader.get_library_versions(lib_name)
+                click.echo(f"   • {lib_name} ({lib_type}, {platform}) - {len(versions)} versions")
+        
+        # Show batch presets
+        if batch_presets:
+            click.echo(f"\n📦 Available Batch Presets:")
+            for preset_name, preset_config in batch_presets.items():
+                description = preset_config.get('description', 'No description')
+                click.echo(f"   • {preset_name}: {description}")
+        
+    except ConfigValidationError as e:
+        click.echo(f"❌ Configuration validation failed:")
+        click.echo(f"   {e}")
+        if e.suggestions:
+            click.echo(f"   Suggestions: {', '.join(e.suggestions)}")
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"❌ Validation error: {e}")
+        logger.error(f"Config validation failed: {e}")
+        sys.exit(1)
+
+
+@cli.command()
 def info():
     """Show system and tool information."""
     click.echo("🔧 Rust x86_64 IDA Signatures Generator")
@@ -1301,6 +1817,611 @@ def cleanup(hours: int):
     except Exception as e:
         click.echo(f"❌ Cleanup failed: {e}")
         sys.exit(1)
+
+
+# ============================================================================
+# Solana eBPF Commands
+# ============================================================================
+
+@cli.group()
+def solana():
+    """Solana eBPF signature generation commands."""
+    pass
+
+
+@solana.command()
+@click.option('--version', default='1.18.16', help='Solana toolchain version')
+@click.option('--force', is_flag=True, help='Force reinstallation if already exists')
+def setup_toolchain(version: str, force: bool):
+    """Setup Solana toolchain for eBPF compilation.
+    
+    Downloads and installs the specified Solana toolchain version
+    with cargo-build-sbf tool for eBPF compilation.
+    
+    Example:
+        solana setup-toolchain --version 1.18.16
+        solana setup-toolchain --version 1.18.16 --force
+    """
+    logger = get_logger(__name__)
+    click.echo(f"🔧 Setting up Solana {version} toolchain...")
+    
+    try:
+        toolchain_manager = SolanaToolchainManager()
+        
+        if not force and toolchain_manager.is_toolchain_installed(version):
+            click.echo(f"✅ Solana {version} is already installed")
+            toolchain_dir = toolchain_manager.get_toolchain_dir(version)
+            click.echo(f"   Location: {toolchain_dir}")
+            return
+        
+        # Install toolchain
+        toolchain_dir = toolchain_manager.install_toolchain(version, force=force)
+        
+        # Verify installation
+        verification = toolchain_manager.verify_installation(version)
+        
+        click.echo(f"✅ Solana {version} toolchain installed successfully!")
+        click.echo(f"   Location: {toolchain_dir}")
+        click.echo(f"   cargo-build-sbf: {'✅' if verification['cargo_build_sbf_executable'] else '❌'}")
+        click.echo(f"   solana CLI: {'✅' if verification['solana_cli_exists'] else '❌'}")
+        
+    except Exception as e:
+        logger.exception("Toolchain setup failed")
+        raise click.ClickException(f"Failed to setup toolchain: {e}")
+
+
+@solana.command()
+@click.option('--crate-version', default='1.18.16', help='solana-program crate version')
+@click.option('--solana-version', default='1.18.16', help='Solana toolchain version')
+@click.option('--cleanup/--no-cleanup', default=True, help='Clean up build artifacts')
+def compile_solana_program(crate_version: str, solana_version: str, cleanup: bool):
+    """Compile solana-program crate to eBPF rlib.
+    
+    Creates a test project with solana-program dependency and compiles
+    it to eBPF using cargo-build-sbf.
+    
+    Example:
+        solana compile-solana-program --crate-version 1.18.16
+        solana compile-solana-program --crate-version 1.18.16 --solana-version 1.18.16
+    """
+    logger = get_logger(__name__)
+    click.echo(f"🏗️ Compiling solana-program {crate_version} with Solana {solana_version}...")
+    
+    try:
+        # Ensure toolchain is available
+        toolchain_manager = SolanaToolchainManager()
+        if not toolchain_manager.is_toolchain_installed(solana_version):
+            click.echo(f"⏳ Solana {solana_version} not found, installing...")
+            toolchain_manager.install_toolchain(solana_version)
+        
+        # Compile crate
+        compiler = SolanaProgramCompiler(toolchain_manager)
+        rlib_path = compiler.compile_solana_program(
+            version=crate_version,
+            solana_version=solana_version,
+            cleanup=cleanup
+        )
+        
+        # Show results
+        rlib_info = compiler.get_rlib_info(rlib_path)
+        
+        click.echo(f"✅ Compilation successful!")
+        click.echo(f"   Output: {rlib_path}")
+        click.echo(f"   Size: {rlib_info['size']} bytes")
+        
+        # Show rlib collection summary
+        collector = RlibCollector()
+        summary = collector.get_rlib_summary()
+        click.echo(f"\n📊 Rlib Collection Summary:")
+        click.echo(f"   Total crates: {summary['total_crates']}")
+        click.echo(f"   Total rlibs: {summary['total_rlibs']}")
+        click.echo(f"   Total size: {summary['total_size_mb']} MB")
+        
+    except Exception as e:
+        logger.exception("Compilation failed")
+        raise click.ClickException(f"Failed to compile: {e}")
+
+
+@solana.command()
+@click.argument('rlib_path', type=click.Path(exists=True))
+@click.option('--output-dir', default=None, help='Output directory for PAT file')
+def generate_pat(rlib_path: str, output_dir: Optional[str]):
+    """Generate PAT file from Solana eBPF rlib.
+    
+    Analyzes the rlib file and generates a FLAIR PAT file
+    using ported algorithms from solana-ida-signatures-factory.
+    
+    Example:
+        solana generate-pat data/solana_ebpf/rlibs/solana-program/libsolana_program-1.18.16.rlib
+        solana generate-pat path/to/lib.rlib --output-dir ./signatures
+    """
+    logger = get_logger(__name__)
+    rlib_file = Path(rlib_path)
+    
+    click.echo(f"🎯 Generating PAT file from: {rlib_file.name}")
+    
+    try:
+        generator = SolanaPATGenerator()
+        
+        # Generate PAT file
+        output_path = None
+        if output_dir:
+            output_path = Path(output_dir) / f"{rlib_file.stem}.pat"
+        
+        pat_path = generator.generate_pat_from_rlib(rlib_file, output_path)
+        
+        # Validate and show statistics
+        validation = generator.validate_pat_file(pat_path)
+        stats = generator.get_pat_statistics(pat_path)
+        
+        click.echo(f"✅ PAT file generated: {pat_path}")
+        click.echo(f"   Functions: {stats['total_functions']}")
+        click.echo(f"   Functions with internals: {stats['functions_with_internals']}")
+        click.echo(f"   Internal references: {stats['total_internal_refs']}")
+        click.echo(f"   Average pattern length: {stats['avg_pattern_length']:.1f}")
+        click.echo(f"   File size: {validation['file_size']:,} bytes")
+        
+        if not validation['valid']:
+            click.echo(f"⚠️ Validation issues found")
+        
+    except Exception as e:
+        logger.exception("PAT generation failed")
+        raise click.ClickException(f"Failed to generate PAT: {e}")
+
+
+@solana.command()
+@click.argument('pat_file', type=click.Path(exists=True))
+@click.option('--name', '-n', help='Signature name (default: from filename)')
+@click.option('--collision-mode', type=click.Choice(['strict', 'accept', 'force', 'manual']), 
+              default='strict', help='Collision handling mode: '
+              'strict (fail on collision), accept (generate partial signatures), '
+              'force (use sigmake -c to override), manual (generate EXC files)')
+def generate_sig(pat_file: str, name: Optional[str], collision_mode: str):
+    """Generate SIG file from PAT using sigmake.
+    
+    Uses the IDA FLAIR sigmake tool to convert PAT files
+    to binary SIG format for use in IDA Pro.
+    
+    Collision handling modes:
+    - strict: Fail on any collision (current behavior)
+    - accept: Generate partial signatures, skip collisions 
+    - force: Use sigmake -c to force generation with collisions
+    - manual: Generate EXC files for manual collision resolution
+    
+    Example:
+        solana generate-sig sigs/solana_program_1.18.16.ebpf.pat
+        solana generate-sig sigs/anchor_lang_0.30.0.ebpf.pat --name "Anchor Lang v0.30"
+        solana generate-sig sigs/solana_program_1.18.16.ebpf.pat --collision-mode accept
+    """
+    logger = get_logger(__name__)
+    pat_path = Path(pat_file)
+    
+    if not name:
+        name = pat_path.stem.replace('_', ' ').title()
+    
+    click.echo(f"📝 Generating SIG file from: {pat_path.name}")
+    click.echo(f"   Signature name: {name}")
+    click.echo(f"   Collision mode: {collision_mode}")
+    
+    try:
+        from ..generators.flair_generator import FLAIRGenerator
+        
+        # Use existing FLAIR generator
+        flair_gen = FLAIRGenerator()
+        
+        # Generate SIG file (handle .ebpf.pat -> .ebpf.sig)
+        if pat_path.name.endswith('.ebpf.pat'):
+            # Replace .ebpf.pat with .ebpf.sig
+            sig_path = pat_path.with_name(pat_path.name.replace('.ebpf.pat', '.ebpf.sig'))
+        else:
+            sig_path = pat_path.with_suffix('.sig')
+        
+        # Handle collision modes
+        if collision_mode == 'accept':
+            # Accept mode: generate partial signatures, skip collisions
+            sig_result = flair_gen.generate_sig_with_collision_handling(
+                pat_path, sig_path, name, mode='accept'
+            )
+        elif collision_mode == 'force':
+            # Force mode: use sigmake -c to override collisions
+            sig_result = flair_gen.generate_sig_with_collision_handling(
+                pat_path, sig_path, name, mode='force'
+            )
+        elif collision_mode == 'manual':
+            # Manual mode: generate EXC files for user editing
+            sig_result = flair_gen.generate_sig_with_collision_handling(
+                pat_path, sig_path, name, mode='manual'
+            )
+        else:
+            # Strict mode: fail on collision (original behavior)
+            sig_result = flair_gen.generate_sig(pat_path, sig_path, name)
+        
+        success = sig_result is not None
+        
+        if success and sig_path.exists():
+            click.echo(f"✅ SIG file generated: {sig_path}")
+            click.echo(f"   Size: {sig_path.stat().st_size:,} bytes")
+            
+            # Show collision handling results
+            if collision_mode != 'strict' and sig_result and 'stats' in sig_result:
+                stats = sig_result['stats']
+                if 'collisions_detected' in stats:
+                    click.echo(f"   Collisions detected: {stats['collisions_detected']}")
+                if 'functions_included' in stats:
+                    click.echo(f"   Functions included: {stats['functions_included']}")
+                if 'functions_skipped' in stats:
+                    click.echo(f"   Functions skipped: {stats['functions_skipped']}")
+            
+            # Installation suggestion
+            click.echo(f"\n💡 Installation:")
+            click.echo(f"   Copy to IDA sig directory: sig/solana_ebpf/")
+            click.echo(f"   Or load manually: File → Load file → FLIRT signature file")
+            
+            # Show manual mode specific instructions
+            if collision_mode == 'manual' and sig_result and 'exc_files' in sig_result:
+                click.echo(f"\n📝 Manual collision resolution:")
+                for exc_file in sig_result['exc_files']:
+                    click.echo(f"   Edit: {exc_file}")
+                click.echo(f"   Then run: solana generate-sig {pat_file} --collision-mode force")
+        else:
+            if collision_mode == 'strict':
+                raise Exception("SIG file generation failed")
+            else:
+                raise Exception(f"SIG file generation failed in {collision_mode} mode")
+        
+    except Exception as e:
+        logger.exception("SIG generation failed")
+        raise click.ClickException(f"Failed to generate SIG: {e}")
+
+
+@solana.command()
+@click.option('--input-folder', '-i', type=click.Path(exists=True), required=True,
+              help='Folder containing PAT files')
+@click.option('--lib-name', '-l', required=True, help='Library name to merge')
+@click.option('--output-file', '-o', type=click.Path(), help='Output merged PAT file')
+@click.option('--drop-duplicates/--keep-duplicates', default=True,
+              help='Remove duplicate function patterns')
+def merge_versions(input_folder: str, lib_name: str, output_file: Optional[str], 
+                   drop_duplicates: bool):
+    """Merge PAT files from different versions of a library.
+    
+    Combines PAT files from multiple versions of the same library,
+    adds version tags to function names, and optionally removes duplicates.
+    
+    Example:
+        solana merge-versions -i sigs/solana-program/ -l solana_program
+        solana merge-versions -i sigs/anchor/ -l anchor_lang -o merged_anchor.ebpf.pat
+    """
+    logger = get_logger(__name__)
+    input_dir = Path(input_folder)
+    
+    click.echo(f"🔗 Merging PAT files for: {lib_name}")
+    click.echo(f"   Input directory: {input_dir}")
+    click.echo(f"   Deduplication: {'✅' if drop_duplicates else '❌'}")
+    
+    try:
+        merger = SolanaVersionMerger()
+        
+        # Find PAT files
+        pat_files = merger.find_pat_files(input_dir, lib_name)
+        if not pat_files:
+            raise Exception(f"No PAT files found for {lib_name}")
+        
+        click.echo(f"   Found versions: {', '.join(v for v, _ in pat_files)}")
+        
+        # Determine output file
+        if not output_file:
+            output_file = input_dir.parent / "merged" / f"{lib_name}_merged.pat"
+        else:
+            output_file = Path(output_file)
+        
+        # Merge files
+        success = merger.merge_pat_files(input_dir, lib_name, output_file, drop_duplicates)
+        
+        if success:
+            # Show statistics
+            stats = merger.get_merge_statistics(output_file)
+            
+            click.echo(f"✅ Merge completed: {output_file}")
+            click.echo(f"   Total functions: {stats['total_functions']}")
+            click.echo(f"   Versions merged: {stats['versions_found']}")
+            click.echo(f"   File size: {stats['file_size']:,} bytes")
+            
+            if stats.get('version_distribution'):
+                click.echo(f"\n📊 Version distribution:")
+                for version, count in stats['version_distribution'].items():
+                    click.echo(f"   {version}: {count} functions")
+        else:
+            raise Exception("Merge operation failed")
+        
+    except Exception as e:
+        logger.exception("Version merge failed")
+        raise click.ClickException(f"Failed to merge versions: {e}")
+
+
+@solana.command()
+def list_toolchains():
+    """List installed Solana toolchains."""
+    try:
+        toolchain_manager = SolanaToolchainManager()
+        versions = toolchain_manager.get_installed_versions()
+        
+        if versions:
+            click.echo("📦 Installed Solana toolchains:")
+            for version in versions:
+                verification = toolchain_manager.verify_installation(version)
+                status = "✅" if verification['cargo_build_sbf_executable'] else "❌"
+                click.echo(f"   {status} {version}")
+        else:
+            click.echo("❌ No Solana toolchains installed")
+            click.echo("💡 Run 'solana setup-toolchain' to install")
+        
+    except Exception as e:
+        raise click.ClickException(f"Failed to list toolchains: {e}")
+
+
+@solana.command()
+def list_rlibs():
+    """List compiled Solana rlib files."""
+    try:
+        collector = RlibCollector()
+        rlibs_by_crate = collector.organize_rlibs_by_crate()
+        
+        if rlibs_by_crate:
+            click.echo("📁 Compiled Solana rlib files:")
+            for crate_name, rlibs in rlibs_by_crate.items():
+                click.echo(f"\n📦 {crate_name}:")
+                for rlib_path in rlibs:
+                    metadata = collector.get_rlib_metadata(rlib_path)
+                    size_mb = int(metadata['size']) / (1024 * 1024)
+                    click.echo(f"   • {rlib_path.name} ({size_mb:.1f} MB)")
+            
+            # Show summary
+            summary = collector.get_rlib_summary()
+            click.echo(f"\n📊 Summary:")
+            click.echo(f"   Total crates: {summary['total_crates']}")
+            click.echo(f"   Total rlibs: {summary['total_rlibs']}")
+            click.echo(f"   Total size: {summary['total_size_mb']} MB")
+        else:
+            click.echo("❌ No rlib files found") 
+            click.echo("💡 Run 'solana compile-solana-program' to compile")
+        
+    except Exception as e:
+        raise click.ClickException(f"Failed to list rlibs: {e}")
+
+
+@solana.command("generate-til")
+@click.option('--version', required=True, help='Solana program version (e.g., 1.18.16)')
+@click.option('--solana-version', default='1.18.16', help='Solana toolchain version')
+@click.option('--crate-name', default='solana-program', help='Crate name to generate TIL for')
+@click.option('--force-recompile', is_flag=True, help='Force recompilation even if debug RLIB exists')
+def solana_generate_til(version: str, solana_version: str, crate_name: str, force_recompile: bool):
+    """Generate TIL file for Solana eBPF crate with debug information.
+    
+    This command compiles the specified Solana crate with debug symbols and generates
+    an IDA Pro TIL (Type Information Library) file for enhanced reverse engineering.
+    
+    Examples:
+        solana generate-til --version 1.18.16
+        solana generate-til --version 1.18.26 --solana-version 1.18.26
+        solana generate-til --version 1.18.16 --crate-name solana-program --force-recompile
+    """
+    logger = get_logger(__name__)
+    click.echo(f"🔧 Generating TIL file for {crate_name} {version} (Solana {solana_version})")
+    
+    try:
+        from ..platforms.solana_ebpf.generators.solana_til_generator import SolanaEbpfTilGenerator
+        
+        til_generator = SolanaEbpfTilGenerator()
+        
+        # Generate TIL file
+        result = til_generator.generate_til_from_crate(
+            crate_name=crate_name,
+            version=version,
+            solana_version=solana_version,
+            force_recompile=force_recompile
+        )
+        
+        # Display results
+        click.echo(f"\n✅ TIL generation completed successfully!")
+        click.echo(f"   📊 Debug quality score: {result['debug_score']}/100")
+        click.echo(f"   📁 Debug RLIB: {result['debug_rlib']}")
+        click.echo(f"   📄 Header file: {result['header_file']}")
+        click.echo(f"   🎯 TIL file: {result['til_file']}")
+        
+        if result.get('analysis'):
+            analysis = result['analysis']
+            click.echo(f"   📈 TIL analysis: {analysis.get('symbols', 0)} symbols, "
+                      f"{analysis.get('size_human', 'unknown')} size")
+        
+        click.echo(f"\n💡 The TIL file is ready for use in IDA Pro!")
+        click.echo(f"   Location: {result['til_file']}")
+        
+    except Exception as e:
+        logger.exception("TIL generation failed")
+        raise click.ClickException(f"TIL generation failed: {e}")
+
+
+@solana.command("batch-generate-til")
+@click.option('-c', '--config', type=click.Path(exists=True), help='Batch configuration file')
+@click.option('-p', '--preset', help='Preset name from configuration file')
+@click.option('--solana-version', help='Override Solana toolchain version')
+def solana_batch_generate_til(config: Optional[str], preset: Optional[str], solana_version: Optional[str]):
+    """Batch generate TIL files for multiple Solana crates.
+    
+    Uses batch configuration system to generate TIL files for multiple crates
+    with their respective versions and toolchain configurations.
+    
+    Examples:
+        solana batch-generate-til -c configs/batch_libraries.yaml -p solana_1_18_16_complete
+        solana batch-generate-til -c configs/batch_libraries.yaml --solana-version 1.18.26
+    """
+    logger = get_logger(__name__)
+    
+    if not config:
+        raise click.ClickException("Configuration file is required for batch TIL generation")
+    
+    try:
+        from ..platforms.solana_ebpf.generators.solana_til_generator import SolanaEbpfTilGenerator
+        
+        # Load configuration
+        with open(config) as f:
+            config_data = yaml.safe_load(f)
+        
+        # Extract batch preset if specified
+        if preset:
+            if 'batch_presets' not in config_data or preset not in config_data['batch_presets']:
+                raise click.ClickException(f"Preset '{preset}' not found in configuration")
+            
+            preset_config = config_data['batch_presets'][preset]
+            libraries = preset_config.get('libraries', [])
+        else:
+            # Use all libraries from configuration
+            libraries = config_data.get('libraries', {})
+        
+        click.echo(f"🔧 Batch generating TIL files...")
+        if preset:
+            click.echo(f"   📋 Using preset: {preset}")
+        click.echo(f"   📁 Config: {config}")
+        
+        til_generator = SolanaEbpfTilGenerator()
+        
+        # Prepare crates configuration for batch processing
+        crates_config = {}
+        
+        if preset:
+            # Process preset format
+            for lib_config in libraries:
+                lib_name = lib_config.get('library', '').replace('_ebpf', '')
+                versions = lib_config.get('versions', [])
+                
+                for version in versions:
+                    crate_name = lib_name.replace('_', '-')  # Convert to crate naming
+                    crates_config[f"{crate_name}_{version}"] = {
+                        'version': version,
+                        'force_recompile': lib_config.get('force_recompile', False)
+                    }
+        else:
+            # Process direct libraries format
+            for lib_name, lib_config in libraries.items():
+                if isinstance(lib_config, dict) and 'versions' in lib_config:
+                    crate_name = lib_config.get('crate_name', lib_name.replace('_', '-'))
+                    for version_config in lib_config['versions']:
+                        version = version_config['version']
+                        # Only generate TIL for versions that have til: true
+                        if version_config.get('generate', {}).get('til', False):
+                            crates_config[f"{crate_name}_{version}"] = {
+                                'version': version,
+                                'force_recompile': False
+                            }
+        
+        if not crates_config:
+            click.echo("⚠️ No crates configured for TIL generation")
+            return
+        
+        # Override Solana version if specified
+        solana_version_to_use = solana_version or config_data.get('default_toolchains', {}).get('solana_ebpf', {}).get('solana_version', '1.18.16')
+        
+        # Batch generate
+        results = til_generator.batch_generate_til_files(crates_config, solana_version_to_use)
+        
+        # Display summary
+        success_count = sum(1 for r in results.values() if r['success'])
+        total_count = len(results)
+        
+        click.echo(f"\n📊 Batch TIL generation completed!")
+        click.echo(f"   ✅ Successful: {success_count}/{total_count}")
+        click.echo(f"   ❌ Failed: {total_count - success_count}")
+        
+        if success_count > 0:
+            click.echo(f"\n✅ Successfully generated TIL files:")
+            for crate_name, result in results.items():
+                if result['success']:
+                    til_path = result['result']['til_file']
+                    debug_score = result['result']['debug_score']
+                    click.echo(f"   • {crate_name}: {til_path} (debug: {debug_score}/100)")
+        
+        if total_count - success_count > 0:
+            click.echo(f"\n❌ Failed TIL generations:")
+            for crate_name, result in results.items():
+                if not result['success']:
+                    click.echo(f"   • {crate_name}: {result['error']}")
+        
+    except Exception as e:
+        logger.exception("Batch TIL generation failed")
+        raise click.ClickException(f"Batch TIL generation failed: {e}")
+
+
+@solana.command()
+@click.option('--version', default='1.18.16', help='solana-program version to test')
+def test_workflow(version: str):
+    """Test the complete Solana eBPF signature generation workflow.
+    
+    Performs a complete test of the workflow:
+    1. Setup toolchain
+    2. Compile solana-program 
+    3. Generate PAT file
+    4. Generate SIG file
+    
+    Example:
+        solana test-workflow --version 1.18.16
+    """
+    logger = get_logger(__name__)
+    click.echo(f"🧪 Testing complete Solana eBPF workflow with version {version}")
+    
+    try:
+        # Step 1: Setup toolchain
+        click.echo(f"\n1️⃣ Setting up toolchain...")
+        toolchain_manager = SolanaToolchainManager()
+        if not toolchain_manager.is_toolchain_installed(version):
+            toolchain_manager.install_toolchain(version)
+        click.echo(f"   ✅ Solana {version} ready")
+        
+        # Step 2: Compile solana-program
+        click.echo(f"\n2️⃣ Compiling solana-program...")
+        compiler = SolanaProgramCompiler(toolchain_manager)
+        rlib_path = compiler.compile_solana_program(version, version, cleanup=True)
+        click.echo(f"   ✅ Compiled: {rlib_path}")
+        
+        # Step 3: Generate PAT
+        click.echo(f"\n3️⃣ Generating PAT file...")
+        generator = SolanaPATGenerator()
+        pat_path = generator.generate_pat_from_rlib(rlib_path)
+        stats = generator.get_pat_statistics(pat_path)
+        click.echo(f"   ✅ Generated: {pat_path} ({stats['total_functions']} functions)")
+        
+        # Step 4: Generate SIG (if FLAIR tools available)
+        click.echo(f"\n4️⃣ Generating SIG file...")
+        try:
+            from ..generators.flair_generator import FLAIRGenerator
+            flair_gen = FLAIRGenerator()
+            # Handle .ebpf.pat -> .ebpf.sig
+            if pat_path.name.endswith('.ebpf.pat'):
+                # Replace .ebpf.pat with .ebpf.sig
+                sig_path = pat_path.with_name(pat_path.name.replace('.ebpf.pat', '.ebpf.sig'))
+            else:
+                sig_path = pat_path.with_suffix('.sig')
+            sig_result = flair_gen.generate_sig_with_collision_handling(
+                pat_path, sig_path, f"Solana Program {version}", mode='accept'
+            )
+            success = sig_result is not None
+            
+            if success and sig_path.exists():
+                click.echo(f"   ✅ Generated: {sig_path}")
+            else:
+                click.echo(f"   ❌ SIG generation failed")
+        except Exception as e:
+            click.echo(f"   ⚠️ SIG generation skipped: {e}")
+        
+        # Summary
+        click.echo(f"\n🎉 Workflow test completed successfully!")
+        click.echo(f"   PAT file: {pat_path}")
+        if 'sig_path' in locals() and sig_path.exists():
+            click.echo(f"   SIG file: {sig_path}")
+        
+    except Exception as e:
+        logger.exception("Workflow test failed")
+        raise click.ClickException(f"Workflow test failed: {e}")
 
 
 if __name__ == '__main__':

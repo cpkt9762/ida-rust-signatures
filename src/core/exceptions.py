@@ -252,6 +252,146 @@ class PermissionError(SignatureError):
         self.operation = operation
 
 
+class ConfigValidationError(SignatureError):
+    """Configuration file validation and parsing errors."""
+    
+    def __init__(
+        self, 
+        message: str, 
+        config_file: Optional[Path] = None,
+        section: Optional[str] = None,
+        field: Optional[str] = None,
+        suggestions: Optional[List[str]] = None
+    ):
+        super().__init__(message)
+        self.config_file = config_file
+        self.section = section
+        self.field = field
+        self.suggestions = suggestions or []
+        
+    def __str__(self) -> str:
+        parts = [super().__str__()]
+        
+        if self.config_file:
+            parts.append(f"Config file: {self.config_file}")
+        
+        if self.section:
+            parts.append(f"Section: {self.section}")
+            
+        if self.field:
+            parts.append(f"Field: {self.field}")
+            
+        if self.suggestions:
+            parts.append(f"Suggestions: {', '.join(self.suggestions)}")
+            
+        return "\n".join(parts)
+    
+    @classmethod
+    def missing_section(
+        cls, 
+        section: str, 
+        config_file: Optional[Path] = None,
+        available_sections: Optional[List[str]] = None
+    ) -> "ConfigValidationError":
+        """Create exception for missing configuration section."""
+        return cls(
+            f"Missing required configuration section: {section}",
+            config_file=config_file,
+            section=section,
+            suggestions=available_sections
+        )
+    
+    @classmethod
+    def invalid_field(
+        cls,
+        field: str,
+        section: str,
+        expected_type: str,
+        actual_value: Any,
+        config_file: Optional[Path] = None
+    ) -> "ConfigValidationError":
+        """Create exception for invalid field value."""
+        return cls(
+            f"Invalid value for field '{field}' in section '{section}': "
+            f"expected {expected_type}, got {type(actual_value).__name__}",
+            config_file=config_file,
+            section=section,
+            field=field
+        )
+
+
+class SubLibraryNotFoundError(ConfigValidationError):
+    """Sub-library reference not found in parent library configuration."""
+    
+    def __init__(
+        self, 
+        sub_library: str,
+        parent_library: str,
+        available_sub_libraries: Optional[List[str]] = None,
+        config_file: Optional[Path] = None
+    ):
+        available_str = ""
+        if available_sub_libraries:
+            available_str = f". Available: {', '.join(available_sub_libraries)}"
+        
+        message = (
+            f"Sub-library '{sub_library}' not found in parent library "
+            f"'{parent_library}'{available_str}"
+        )
+        
+        super().__init__(
+            message,
+            config_file=config_file,
+            section=f"libraries.{parent_library}.sub_libraries",
+            field=sub_library,
+            suggestions=available_sub_libraries
+        )
+        
+        self.sub_library = sub_library
+        self.parent_library = parent_library
+        self.available_sub_libraries = available_sub_libraries or []
+    
+    @classmethod
+    def from_reference(
+        cls,
+        sub_library: str,
+        parent_library: str,
+        parent_config: Dict[str, Any],
+        config_file: Optional[Path] = None
+    ) -> "SubLibraryNotFoundError":
+        """Create exception from parent library configuration."""
+        available_subs = list(parent_config.get('sub_libraries', {}).keys())
+        return cls(
+            sub_library=sub_library,
+            parent_library=parent_library,
+            available_sub_libraries=available_subs,
+            config_file=config_file
+        )
+
+
+class ToolchainVersionError(ConfigValidationError):
+    """Toolchain version compatibility and inheritance errors."""
+    
+    def __init__(
+        self, 
+        message: str,
+        library: Optional[str] = None,
+        version: Optional[str] = None,
+        toolchain_field: Optional[str] = None,
+        config_file: Optional[Path] = None
+    ):
+        super().__init__(
+            message,
+            config_file=config_file,
+            section=f"libraries.{library}" if library else None,
+            field=toolchain_field
+        )
+        
+        self.library = library
+        self.version = version
+        self.toolchain_field = toolchain_field
+
+
 def handle_subprocess_error(
     e: Exception, 
     command: List[str], 
