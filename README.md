@@ -16,6 +16,7 @@ A comprehensive multi-platform toolkit for generating IDA Pro FLIRT signatures a
 - **完整算法移植**: 忠实移植 solana-ida-signatures-factory 核心算法
 - **版本合并器**: 智能去重，版本范围命名，避免签名冲突
 - **文件命名规范**: `name_version.ebpf.pat/sig` 格式，支持版本管理
+- **Rust 标准库子库支持**: 自动生成 `core`、`std`、`alloc` 子库签名，支持精细化分析
 
 ### 🛡️ 智能碰撞处理系统
 - **多种处理模式**: strict, accept, force, manual 四种模式
@@ -35,6 +36,13 @@ A comprehensive multi-platform toolkit for generating IDA Pro FLIRT signatures a
 - **Rust 名称还原**: 集成 rust-demangler，签名中显示可读函数名
 - **批量处理**: 多 RLIB 文件同时处理，进度跟踪
 - **缓存优化**: 内置缓存避免重复编译和提取
+
+### 🧩 子库系统 | Sublibrary System
+- **自动子库生成**: 从主库 PAT 文件中自动提取 Rust 标准库子库 (core、std、alloc)
+- **函数命名空间分离**: 基于 mangled name 前缀 (`_ZN4core`, `_ZN3std`, `_ZN5alloc`) 进行智能分类
+- **版本继承机制**: 子库自动继承主库的工具链版本信息 (如 Solana 1.18.16 → Rust 1.75.0)
+- **配置驱动**: 通过 `configs/batch_libraries.yaml` 定义父子库关系和批量处理规则
+- **独立签名文件**: 每个子库生成独立的 `.pat` 和 `.sig` 文件，便于精细化分析
 
 ## 🚀 快速开始 | Quick Start
 
@@ -106,6 +114,9 @@ python -m src.cli.main solana test-workflow --version 1.18.16
 
 # 7. 合并多版本签名 | Merge multi-version signatures
 python -m src.cli.main solana merge-versions --versions 1.18.16,1.18.26,2.1.21
+
+# 8. 批量处理 (包含自动子库生成) | Batch processing (with automatic sublibrary generation)
+python -m src.cli.main solana batch-libraries --config configs/batch_libraries.yaml
 ```
 
 #### 📘 x86_64 平台使用 | x86_64 Platform Usage
@@ -398,6 +409,38 @@ Options:
   -p, --pattern TEXT               File pattern to match (default: *.rlib)
 ```
 
+### Solana eBPF Commands
+
+#### `solana batch-libraries` - Batch Processing with Sublibrary Generation
+```bash
+python -m src.cli.main solana batch-libraries [OPTIONS]
+
+Options:
+  --config PATH                    YAML configuration file (default: configs/batch_libraries.yaml)
+  --dry-run                        Show what would be processed without executing
+
+Features:
+- Automatic main library compilation and signature generation
+- Automatic Rust standard library sublibrary extraction (core, std, alloc)
+- Version inheritance from main library to sublibraries
+- Progress tracking and error handling
+```
+
+#### `solana extract-sublibraries` - Extract Rust Standard Library Sublibraries
+```bash
+python -m src.cli.main solana extract-sublibraries PAT_FILE [OPTIONS]
+
+Options:
+  --rust-version TEXT              Rust version for sublibrary naming
+  --components TEXT                Comma-separated components (default: core,std,alloc)
+  -o, --output-dir PATH            Output directory
+
+Features:
+- Extracts functions based on mangled name prefixes
+- Generates independent PAT and SIG files for each component
+- Maintains function signatures and metadata
+```
+
 ### Utility Commands
 
 #### `info` - System Information
@@ -624,6 +667,7 @@ python -m src.cli.main generate clap config --version-tag
 - **碰撞处理优化**: 实现智能碰撞处理系统，显著减少手动干预
 - **配置系统改进**: 引入 YAML 配置文件，支持批量处理和工具链版本映射
 - **TIL 生成增强**: 添加 fallback 机制，提高跨平台兼容性
+- **子库自动生成**: 实现 Rust 标准库子库 (core/std/alloc) 的自动提取和生成功能
 
 #### 未来发展方向
 - 改进 eBPF DWARF 解析器，支持 eBPF 特有的重定位类型

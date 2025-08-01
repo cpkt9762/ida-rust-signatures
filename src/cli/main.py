@@ -1208,6 +1208,76 @@ def _process_solana_library(config: Dict, lib_name: str, lib_version: str) -> bo
                 logger.warning(f"SIG generation failed: {e}")
                 click.echo(f"    ❌ SIG generation failed: {e}")
         
+        # Process sub-libraries if configured
+        sub_libraries = config.get('include_sub_libraries', [])
+        if sub_libraries:
+            click.echo(f"  🔄 Processing {len(sub_libraries)} sub-libraries...")
+            
+            try:
+                from ..platforms.solana_ebpf.generators.sublibrary_extractor import SubLibraryExtractor
+                
+                # Get rust version from toolchain mapping
+                rust_version = resolved_toolchain.get('rust_version', '1.75.0')
+                
+                # Map configuration sub-library names to component names
+                component_mapping = {
+                    'rust_core_ebpf': 'core',
+                    'rust_std_ebpf': 'std', 
+                    'rust_alloc_ebpf': 'alloc'
+                }
+                
+                # Convert sub-library names to component names
+                components_to_extract = []
+                for sub_lib in sub_libraries:
+                    if sub_lib in component_mapping:
+                        components_to_extract.append(component_mapping[sub_lib])
+                    else:
+                        logger.warning(f"Unknown sub-library: {sub_lib}")
+                
+                # Extract sub-libraries
+                extractor = SubLibraryExtractor()
+                sub_results = extractor.extract_sublibraries_from_pat(
+                    pat_path, rust_version, components_to_extract
+                )
+                
+                # Generate SIG files for each sub-library if configured
+                sub_sig_count = 0
+                for component, sub_pat_path in sub_results.items():
+                    if sub_pat_path and sub_pat_path.exists():
+                        click.echo(f"    ✅ {component}: {sub_pat_path}")
+                        
+                        # Check if SIG generation is enabled for this version
+                        if current_version_config and current_version_config.get('generate', {}).get('sig', False):
+                            try:
+                                from ..generators.flair_generator import FLAIRGenerator
+                                flair_gen = FLAIRGenerator()
+                                sub_sig_path = sub_pat_path.with_suffix('.sig')
+                                
+                                # Generate SIG for sub-library
+                                result = flair_gen.generate_sig_with_collision_handling(
+                                    sub_pat_path, sub_sig_path, f"{component}_{rust_version}_ebpf", mode='accept'
+                                )
+                                
+                                if result and result.get('success'):
+                                    sub_sig_count += 1
+                                    click.echo(f"      ✅ SIG: {sub_sig_path}")
+                                else:
+                                    click.echo(f"      ⚠️  SIG generation failed for {component}")
+                                    
+                            except Exception as sub_sig_error:
+                                click.echo(f"      ❌ SIG generation failed for {component}: {sub_sig_error}")
+                    else:
+                        click.echo(f"    ❌ {component}: extraction failed")
+                
+                success_sub_count = sum(1 for path in sub_results.values() if path is not None)
+                click.echo(f"    📊 Sub-libraries: {success_sub_count}/{len(sub_libraries)} PAT files generated")
+                if sub_sig_count > 0:
+                    click.echo(f"    📊 Sub-library SIGs: {sub_sig_count}/{success_sub_count} SIG files generated")
+                    
+            except Exception as sub_error:
+                logger.warning(f"Sub-library processing failed: {sub_error}")
+                click.echo(f"    ❌ Sub-library processing failed: {sub_error}")
+
         click.echo(f"    ✅ RLIB: {rlib_path}")
         click.echo(f"    ✅ PAT: {pat_path}")
         
@@ -2422,6 +2492,172 @@ def test_workflow(version: str):
     except Exception as e:
         logger.exception("Workflow test failed")
         raise click.ClickException(f"Workflow test failed: {e}")
+
+
+@solana.command()
+@click.option('--solana-version', default='1.18.16', help='Solana version for toolchain')
+@click.option('--rust-version', default=None, help='Rust version (auto-detect if not specified)')
+@click.option('--components', default='core,alloc,std', help='Components to compile (comma-separated)')
+def test_stdlib(solana_version: str, rust_version: Optional[str], components: str):
+    """Test Rust standard library component compilation for eBPF.
+    
+    Compiles individual Rust standard library components (core, std, alloc)
+    to eBPF format for signature generation.
+    
+    Example:
+        solana test-stdlib --solana-version 1.18.16
+        solana test-stdlib --components core,alloc --solana-version 1.18.16
+    """
+    logger = get_logger(__name__)
+    click.echo(f"🧪 Testing Rust stdlib compilation for Solana {solana_version}")
+    
+    try:
+        from ..platforms.solana_ebpf.builders.rust_stdlib_compiler import RustStdLibraryCompiler
+        
+        # Initialize compiler
+        stdlib_compiler = RustStdLibraryCompiler()
+        
+        # Auto-detect Rust version if not specified
+        if rust_version is None:
+            toolchain_info = stdlib_compiler.get_rust_toolchain_info(solana_version)
+            rust_version = toolchain_info['rust_version']
+            click.echo(f"🔧 Auto-detected Rust version: {rust_version}")
+        
+        # Parse components
+        component_list = [c.strip() for c in components.split(',')]
+        click.echo(f"📦 Components to compile: {', '.join(component_list)}")
+        
+        # Compile all components
+        click.echo(f"\n🏗️ Compiling stdlib components...")
+        results = stdlib_compiler.compile_all_components(
+            rust_version, solana_version, component_list
+        )
+        
+        # Display results
+        click.echo(f"\n📊 Compilation Results:")
+        success_count = 0
+        for component, rlib_path in results.items():
+            if rlib_path and rlib_path.exists():
+                size_mb = rlib_path.stat().st_size / (1024 * 1024)
+                click.echo(f"   ✅ {component}: {rlib_path.name} ({size_mb:.1f}MB)")
+                success_count += 1
+            else:
+                click.echo(f"   ❌ {component}: compilation failed")
+        
+        # Generate PAT files for successful compilations
+        if success_count > 0:
+            click.echo(f"\n🎯 Generating PAT files...")
+            from ..platforms.solana_ebpf.generators.solana_pat_generator import SolanaPATGenerator
+            pat_generator = SolanaPATGenerator()
+            
+            for component, rlib_path in results.items():
+                if rlib_path and rlib_path.exists():
+                    try:
+                        pat_path = pat_generator.generate_pat_from_rlib(rlib_path)
+                        stats = pat_generator.get_pat_statistics(pat_path)
+                        click.echo(f"   ✅ {component}: {pat_path.name} ({stats['total_functions']} functions)")
+                    except Exception as e:
+                        click.echo(f"   ⚠️ {component}: PAT generation failed - {e}")
+        
+        click.echo(f"\n🎉 Stdlib test completed!")
+        click.echo(f"   Successful components: {success_count}/{len(component_list)}")
+        
+    except Exception as e:
+        logger.exception("Stdlib test failed")
+        raise click.ClickException(f"Stdlib test failed: {e}")
+
+
+@solana.command()
+@click.argument('main_pat_file', type=click.Path(exists=True))
+@click.option('--version', default='1.75.0', help='Rust version for sublibrary naming')
+@click.option('--components', default='core,std,alloc', help='Components to extract (comma-separated)')
+@click.option('--generate-sig', is_flag=True, help='Also generate SIG files for extracted PAT files')
+def extract_sublibraries(main_pat_file: str, version: str, components: str, generate_sig: bool):
+    """Extract Rust standard library sublibraries from main library PAT file.
+    
+    This approach extracts sublibrary PAT files by filtering functions from the
+    main library based on their mangled namespaces (core, std, alloc).
+    
+    Example:
+        solana extract-sublibraries data/solana_ebpf/signatures/pat/solana_program_1_18_16_ebpf_ebpf.pat
+        solana extract-sublibraries main.pat --version 1.75.0 --components core,alloc --generate-sig
+    """
+    logger = get_logger(__name__)
+    click.echo(f"🔄 Extracting sublibraries from {main_pat_file}")
+    
+    try:
+        from ..platforms.solana_ebpf.generators.sublibrary_extractor import SubLibraryExtractor
+        
+        # Initialize extractor
+        extractor = SubLibraryExtractor()
+        
+        # Parse components
+        component_list = [c.strip() for c in components.split(',')]
+        click.echo(f"📦 Components to extract: {', '.join(component_list)}")
+        
+        # Get statistics first
+        click.echo(f"\n📊 Analyzing main PAT file...")
+        stats = extractor.get_extraction_statistics(Path(main_pat_file))
+        for component, count in stats.items():
+            if component != "total" and count > 0:
+                click.echo(f"   {component}: {count} functions")
+        click.echo(f"   Total functions: {stats['total']}")
+        
+        # Extract sublibraries
+        click.echo(f"\n🔄 Extracting sublibrary PAT files...")
+        results = extractor.extract_sublibraries_from_pat(
+            Path(main_pat_file), version, component_list
+        )
+        
+        # Display results
+        click.echo(f"\n📋 Extraction Results:")
+        success_count = 0
+        for component, pat_path in results.items():
+            if pat_path and pat_path.exists():
+                size_kb = pat_path.stat().st_size / 1024
+                func_count = len(extractor.parse_pat_file(pat_path))
+                click.echo(f"   ✅ {component}: {pat_path.name} ({func_count} functions, {size_kb:.1f}KB)")
+                success_count += 1
+            else:
+                click.echo(f"   ❌ {component}: extraction failed")
+        
+        # Generate SIG files if requested
+        if generate_sig and success_count > 0:
+            click.echo(f"\n🎯 Generating SIG files...")
+            try:
+                from ..generators.flair_generator import FLAIRGenerator
+                flair_gen = FLAIRGenerator()
+                
+                for component, pat_path in results.items():
+                    if pat_path and pat_path.exists():
+                        try:
+                            # Generate SIG file with same naming pattern
+                            sig_path = pat_path.with_suffix('.sig')
+                            sig_result = flair_gen.generate_sig_with_collision_handling(
+                                pat_path, sig_path, f"Rust {component.title()} Library {version}", mode='accept'
+                            )
+                            if sig_result and sig_path.exists():
+                                size_kb = sig_path.stat().st_size / 1024
+                                click.echo(f"   ✅ {component}: {sig_path.name} ({size_kb:.1f}KB)")
+                            else:
+                                click.echo(f"   ❌ {component}: SIG generation failed")
+                        except Exception as e:
+                            click.echo(f"   ⚠️ {component}: SIG generation error - {e}")
+            except ImportError:
+                click.echo(f"   ⚠️ FLAIR tools not available for SIG generation")
+        
+        # Validation
+        click.echo(f"\n✅ Validation:")
+        validation_results = extractor.validate_sublibrary_extraction(Path(main_pat_file), results)
+        valid_count = sum(1 for valid in validation_results.values() if valid)
+        click.echo(f"   Valid extractions: {valid_count}/{len(component_list)}")
+        
+        click.echo(f"\n🎉 Sublibrary extraction completed!")
+        click.echo(f"   Successful extractions: {success_count}/{len(component_list)}")
+        
+    except Exception as e:
+        logger.exception("Sublibrary extraction failed")
+        raise click.ClickException(f"Sublibrary extraction failed: {e}")
 
 
 if __name__ == '__main__':

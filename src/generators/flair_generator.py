@@ -302,23 +302,66 @@ class FLAIRGenerator(LoggerMixin):
         self.logger.info(f"Processing collision file: {exc_file}")
         
         try:
-            # Read collision file and comment out all collision entries
+            # Read collision file and intelligently select best functions
             lines = exc_file.read_text(encoding='utf-8').splitlines()
-            processed_lines = []
+            collision_groups = self._parse_exc_collision_groups(lines)
             
-            collision_count = 0
-            for line in lines:
-                if line.strip() and not line.startswith(';'):
-                    # Comment out collision entry
-                    processed_lines.append(f";{line}")
-                    collision_count += 1
+            # Create mapping of selected functions
+            selected_functions = {}
+            selected_count = 0
+            total_collision_functions = 0
+            
+            for group_functions in collision_groups.values():
+                total_collision_functions += len(group_functions)
+                if len(group_functions) > 1:
+                    # Select best function from collision group
+                    best_function_line = self._select_best_function_from_group(group_functions)
+                    best_func_name = best_function_line.split('\t')[0]
+                    
+                    # Mark which functions are selected in this group
+                    for func_line in group_functions:
+                        func_name = func_line.split('\t')[0]
+                        selected_functions[func_name] = (func_name == best_func_name)
+                        if func_name == best_func_name:
+                            selected_count += 1
                 else:
-                    processed_lines.append(line)
+                    # Single function, no collision - always select
+                    func_name = group_functions[0].split('\t')[0]
+                    selected_functions[func_name] = True
+                    selected_count += 1
+            
+            # Process original lines and add prefixes
+            processed_lines = []
+            skip_headers = True
+            for line in lines:
+                stripped_line = line.strip()
+                
+                # Skip header comment lines (until we find first function)
+                if skip_headers and (stripped_line.startswith(';') or not stripped_line):
+                    continue
+                elif '\t' in stripped_line:
+                    # This is a function line - we've found functions, stop skipping headers
+                    skip_headers = False
+                    func_name = stripped_line.split('\t')[0]
+                    if func_name in selected_functions:
+                        if selected_functions[func_name]:
+                            # Selected function - add '+' prefix
+                            processed_lines.append(f"+{line}")
+                        else:
+                            # Not selected - keep as-is (will be excluded)
+                            processed_lines.append(line)
+                    else:
+                        # Unknown function - keep as-is
+                        processed_lines.append(line)
+                else:
+                    # Other lines after headers - keep as-is
+                    if not skip_headers:
+                        processed_lines.append(line)
             
             # Write back the processed collision file
             exc_file.write_text('\n'.join(processed_lines), encoding='utf-8')
             
-            self.logger.info(f"Commented out {collision_count} collision entries")
+            self.logger.info(f"Processed {len(collision_groups)} collision groups, selected {selected_count} best functions from {total_collision_functions} total functions")
             
             # Retry sigmake with processed collision file
             result = subprocess.run(
@@ -542,9 +585,9 @@ class FLAIRGenerator(LoggerMixin):
         output_sig.parent.mkdir(parents=True, exist_ok=True)
         
         if mode == 'strict':
-            # Use existing generate_sig method
+            # Use existing generate_sig method with intelligent collision handling
             try:
-                self.generate_sig(pat_file, output_sig, lib_name, handle_collisions=False)
+                self.generate_sig(pat_file, output_sig, lib_name, handle_collisions=True)
                 return {'success': True, 'mode': mode}
             except Exception:
                 return None
@@ -564,90 +607,14 @@ class FLAIRGenerator(LoggerMixin):
         else:
             raise ValueError(f"Unknown collision mode: {mode}")
     
-    def _generate_sig_accept_mode(
+    def _generate_sig_with_filtered_pat(
         self, 
         pat_file: Path, 
         output_sig: Path, 
-        lib_name: Optional[str]
+        lib_name: Optional[str],
+        mode: str
     ) -> Optional[Dict[str, Any]]:
-        """Generate SIG in accept mode - create partial signatures, skip collisions."""
-        
-        # Build sigmake command
-        cmd = [str(self.sigmake_path)]
-        if lib_name:
-            cmd.append(f"-n{lib_name}")
-        cmd.extend([str(pat_file), str(output_sig)])
-        
-        try:
-            # First attempt - let it fail with collisions
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            
-            self.logger.debug(f"Sigmake first attempt - return code: {result.returncode}")
-            self.logger.debug(f"Sigmake stdout: {result.stdout}")
-            self.logger.debug(f"Sigmake stderr: {result.stderr}")
-            
-            if result.returncode == 0 and output_sig.exists():
-                # No collisions, normal success
-                return {
-                    'success': True, 
-                    'mode': 'accept',
-                    'stats': {
-                        'collisions_detected': 0,
-                        'functions_included': self._count_pat_patterns(pat_file),
-                        'functions_skipped': 0
-                    }
-                }
-            
-            # Check if collision file was generated
-            exc_file = pat_file.with_suffix('.exc')
-            if not exc_file.exists():
-                self.logger.error(f"No EXC file generated: {exc_file}")
-                return None
-            
-            # Process EXC file to accept partial signatures
-            original_count, processed_count = self._process_exc_file_accept_mode(exc_file)
-            
-            # Retry sigmake with processed EXC
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            
-            self.logger.debug(f"Sigmake retry - return code: {result.returncode}")
-            self.logger.debug(f"Sigmake retry stdout: {result.stdout}")
-            self.logger.debug(f"Sigmake retry stderr: {result.stderr}")
-            
-            if output_sig.exists():
-                return {
-                    'success': True,
-                    'mode': 'accept', 
-                    'stats': {
-                        'collisions_detected': original_count - processed_count,
-                        'functions_included': processed_count,
-                        'functions_skipped': original_count - processed_count
-                    }
-                }
-            else:
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Accept mode generation failed: {e}")
-            return None
-    
-    def _generate_sig_force_mode(
-        self, 
-        pat_file: Path, 
-        output_sig: Path, 
-        lib_name: Optional[str]
-    ) -> Optional[Dict[str, Any]]:
-        """Generate SIG in force mode - create filtered PAT file without collisions."""
+        """Generate SIG using filtered PAT file method - unified logic for accept/force modes."""
         
         try:
             # First, run sigmake to detect collisions and generate EXC file
@@ -666,12 +633,12 @@ class FLAIRGenerator(LoggerMixin):
             exc_file = pat_file.with_suffix('.exc')
             if exc_file.exists():
                 # Process collisions by selecting best functions
-                self.logger.info("Collisions detected, applying force mode resolution...")
+                self.logger.info(f"Collisions detected, applying {mode} mode resolution...")
                 
                 # Process collision information without modifying the original EXC file
                 original_exc_lines = exc_file.read_text(encoding='utf-8').splitlines()
                 
-                # Get collision resolution results without modifying the file
+                # Get collision resolution results
                 selected_functions, original_count, processed_count = self._get_collision_resolution(original_exc_lines)
                 
                 # Create a filtered PAT file without colliding functions
@@ -698,7 +665,7 @@ class FLAIRGenerator(LoggerMixin):
                 if output_sig.exists():
                     return {
                         'success': True,
-                        'mode': 'force',
+                        'mode': mode,
                         'stats': {
                             'collisions_detected': original_count - processed_count,
                             'functions_included': processed_count,
@@ -712,7 +679,7 @@ class FLAIRGenerator(LoggerMixin):
                 if output_sig.exists():
                     return {
                         'success': True,
-                        'mode': 'force', 
+                        'mode': mode, 
                         'stats': {
                             'collisions_detected': 0,
                             'functions_included': self._count_pat_patterns(pat_file),
@@ -723,8 +690,26 @@ class FLAIRGenerator(LoggerMixin):
                     return None
                     
         except Exception as e:
-            self.logger.error(f"Force mode generation failed: {e}")
+            self.logger.error(f"{mode.title()} mode generation failed: {e}")
             return None
+
+    def _generate_sig_accept_mode(
+        self, 
+        pat_file: Path, 
+        output_sig: Path, 
+        lib_name: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Generate SIG in accept mode - create filtered PAT file without collisions."""
+        return self._generate_sig_with_filtered_pat(pat_file, output_sig, lib_name, 'accept')
+    
+    def _generate_sig_force_mode(
+        self, 
+        pat_file: Path, 
+        output_sig: Path, 
+        lib_name: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Generate SIG in force mode - create filtered PAT file without collisions."""
+        return self._generate_sig_with_filtered_pat(pat_file, output_sig, lib_name, 'force')
     
     def _generate_sig_manual_mode(
         self, 
@@ -803,92 +788,6 @@ class FLAIRGenerator(LoggerMixin):
         best_function = min(collision_group, key=get_function_score)
         return best_function
     
-    def _process_exc_file_accept_mode(self, exc_file: Path) -> tuple[int, int]:
-        """Process EXC file for accept mode - keep only the best function from each collision group."""
-        
-        lines = exc_file.read_text(encoding='utf-8').splitlines()
-        
-        original_count = 0
-        processed_count = 0
-        
-        self.logger.debug(f"EXC file has {len(lines)} lines")
-        
-        # Group functions by their signature pattern (CRC + pattern)
-        signature_groups = {}
-        header_lines = []
-        
-        # First pass: organize functions by signature and collect headers
-        for i, line in enumerate(lines):
-            stripped_line = line.strip()
-            
-            # Keep header lines that start with semicolon
-            if stripped_line.startswith(';'):
-                header_lines.append(line)
-                continue
-            
-            # Keep empty lines in header
-            if not stripped_line:
-                if not signature_groups:  # Only keep empty lines before functions start
-                    header_lines.append(line)
-                continue
-            
-            # Function entry - check if it contains tab-separated data
-            if '\t' in stripped_line:
-                parts = stripped_line.split('\t')
-                if len(parts) >= 2:
-                    func_name = parts[0]
-                    pattern_data = parts[1]
-                    
-                    # Parse pattern data - format is: CRC PATTERN
-                    pattern_parts = pattern_data.split(' ', 2)
-                    if len(pattern_parts) >= 2:
-                        crc = pattern_parts[0]
-                        pattern = pattern_parts[1]
-                        
-                        # Create signature key from CRC and pattern
-                        sig_key = f"{crc}:{pattern}"
-                        
-                        if sig_key not in signature_groups:
-                            signature_groups[sig_key] = []
-                        
-                        signature_groups[sig_key].append(line)
-                        original_count += 1
-                        self.logger.debug(f"Found function: {func_name[:50]}... CRC: {crc} Pattern: {pattern[:20]}...")
-        
-        # Second pass: select best function from each collision group
-        selected_functions = []
-        collision_groups_processed = 0
-        
-        for sig_key, group in signature_groups.items():
-            if len(group) > 1:
-                # This is a collision group - select the best function
-                best_function = self._select_best_function_from_group(group)
-                selected_functions.append(f"+{best_function}")  # Add + prefix for selection
-                collision_groups_processed += 1
-                processed_count += 1
-                
-                best_func_name = best_function.split('\t')[0]
-                self.logger.debug(f"Collision group with {len(group)} functions, selected: {best_func_name}")
-            else:
-                # No collision, keep as-is with + prefix
-                selected_functions.append(f"+{group[0]}")
-                processed_count += 1
-        
-        # Rebuild EXC file with header and selected functions
-        new_content = []
-        
-        # Add header lines (comments and instructions)
-        new_content.extend(header_lines)
-        
-        # Add selected functions
-        new_content.extend(selected_functions)
-        
-        # Write back processed EXC file
-        exc_file.write_text('\n'.join(new_content), encoding='utf-8')
-        
-        self.logger.info(f"Processed EXC file: {original_count} original functions, kept {processed_count} (resolved {collision_groups_processed} collision groups)")
-        
-        return original_count, processed_count
     
     def _create_filtered_pat_file(self, original_pat: Path, exc_file: Path, original_exc_lines: list[str]) -> Path:
         """Create a filtered PAT file excluding functions that have collisions."""
@@ -1110,3 +1009,44 @@ class FLAIRGenerator(LoggerMixin):
         except Exception as e:
             self.logger.warning(f"Failed to count EXC collisions: {e}")
             return 0
+    
+    def _parse_exc_collision_groups(self, lines: list[str]) -> dict[str, list[str]]:
+        """Parse EXC file lines into collision groups by signature pattern.
+        
+        Args:
+            lines: List of lines from EXC file
+            
+        Returns:
+            Dictionary mapping signature keys to lists of collision function lines
+        """
+        collision_groups = {}
+        
+        for line in lines:
+            stripped_line = line.strip()
+            
+            # Skip header lines and empty lines
+            if stripped_line.startswith(';') or not stripped_line:
+                continue
+            
+            # Parse function entry with tab-separated data
+            if '\t' in stripped_line:
+                parts = stripped_line.split('\t')
+                if len(parts) >= 2:
+                    func_name = parts[0]
+                    pattern_data = parts[1]
+                    
+                    # Parse pattern data - format is: CRC PATTERN
+                    pattern_parts = pattern_data.split(' ', 2)
+                    if len(pattern_parts) >= 2:
+                        crc = pattern_parts[0] 
+                        pattern = pattern_parts[1]
+                        
+                        # Create signature key from CRC and pattern
+                        sig_key = f"{crc}:{pattern}"
+                        
+                        if sig_key not in collision_groups:
+                            collision_groups[sig_key] = []
+                        
+                        collision_groups[sig_key].append(stripped_line)
+        
+        return collision_groups

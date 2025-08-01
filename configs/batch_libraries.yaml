@@ -198,7 +198,7 @@ libraries:
           rlib: true      # 会根据 til 需求自动选择编译模式
           pat: true
           sig: true
-          til: true       # 需要 TIL → 调试模式编译
+          til: false      # 禁用 TIL → 发布模式编译
         # 使用库推荐的 toolchain
         compilation_overrides:
           debug_mode:
