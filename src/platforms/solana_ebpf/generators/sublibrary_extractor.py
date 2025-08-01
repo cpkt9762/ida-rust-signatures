@@ -6,6 +6,7 @@ the main library PAT file by filtering functions based on their mangled names.
 
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+import shutil
 
 from ....core.config import settings
 from ....core.logger import LoggerMixin
@@ -37,6 +38,9 @@ class SubLibraryExtractor(LoggerMixin):
         """Initialize the sublibrary extractor."""
         self.signatures_dir = settings.data_dir / "solana_ebpf" / "signatures"
         self.signatures_dir.mkdir(parents=True, exist_ok=True)
+        
+        # IDA Pro installation directory
+        self.ida_sig_dir = Path("/Applications/IDA Professional 9.1.app/Contents/MacOS/sig/solana_ebpf")
         
         self.logger.info("Sublibrary extractor initialized")
     
@@ -264,5 +268,115 @@ class SubLibraryExtractor(LoggerMixin):
             except Exception as e:
                 self.logger.error(f"Validation failed for {component}: {e}")
                 results[component] = False
+        
+        return results
+    
+    def generate_sig_from_pat(self, pat_file: Path, output_dir: Optional[Path] = None, 
+                             install_to_ida: bool = False) -> Optional[Path]:
+        """Generate SIG file from PAT file using FLAIR.
+        
+        Args:
+            pat_file: Path to PAT file
+            output_dir: Output directory for SIG file (default: signatures/sig/)
+            install_to_ida: Whether to install to IDA directory
+            
+        Returns:
+            Path to generated SIG file, or None if generation failed
+        """
+        try:
+            from ....generators.flair_generator import FLAIRGenerator
+            
+            # Determine output directory
+            if output_dir is None:
+                output_dir = self.signatures_dir / "sig"
+            
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate SIG filename
+            sig_filename = pat_file.stem + ".sig"
+            sig_path = output_dir / sig_filename
+            
+            # Use FLAIR generator
+            flair_gen = FLAIRGenerator()
+            library_name = pat_file.stem.replace("_ebpf", "")
+            
+            result = flair_gen.generate_sig_with_collision_handling(
+                pat_file, sig_path, library_name, mode='accept'
+            )
+            
+            if result and result.get('success') and sig_path.exists():
+                self.logger.info(f"Generated SIG file: {sig_path}")
+                
+                # Install to IDA if requested
+                if install_to_ida:
+                    self.install_sig_to_ida(sig_path)
+                
+                return sig_path
+            else:
+                self.logger.error(f"Failed to generate SIG file for {pat_file}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"SIG generation failed for {pat_file}: {e}")
+            return None
+    
+    def install_sig_to_ida(self, sig_file: Path) -> bool:
+        """Install SIG file to IDA Pro directory.
+        
+        Args:
+            sig_file: Path to SIG file to install
+            
+        Returns:
+            True if installation succeeded, False otherwise
+        """
+        try:
+            # Ensure IDA directory exists
+            self.ida_sig_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Copy SIG file to IDA directory
+            ida_sig_path = self.ida_sig_dir / sig_file.name
+            shutil.copy2(sig_file, ida_sig_path)
+            
+            self.logger.info(f"Installed SIG to IDA: {ida_sig_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to install SIG to IDA: {e}")
+            return False
+    
+    def extract_and_generate_sigs(self, main_pat_file: Path, version: str,
+                                 components: Optional[List[str]] = None,
+                                 install_to_ida: bool = False) -> Dict[str, Dict[str, Optional[Path]]]:
+        """Extract sublibraries and generate both PAT and SIG files.
+        
+        Args:
+            main_pat_file: Path to main library PAT file
+            version: Version string for output files
+            components: List of components to extract (default: all)
+            install_to_ida: Whether to install SIG files to IDA
+            
+        Returns:
+            Dictionary with component names as keys and dictionaries containing
+            'pat' and 'sig' paths as values
+        """
+        results = {}
+        
+        # Extract PAT files
+        pat_results = self.extract_sublibraries_from_pat(main_pat_file, version, components)
+        
+        # Generate SIG files for each successful PAT
+        for component, pat_path in pat_results.items():
+            results[component] = {'pat': pat_path, 'sig': None}
+            
+            if pat_path and pat_path.exists():
+                sig_path = self.generate_sig_from_pat(pat_path, install_to_ida=install_to_ida)
+                results[component]['sig'] = sig_path
+        
+        # Summary
+        success_pats = sum(1 for r in results.values() if r['pat'] is not None)
+        success_sigs = sum(1 for r in results.values() if r['sig'] is not None)
+        
+        self.logger.info(f"Extraction summary: {success_pats}/{len(results)} PAT files, "
+                        f"{success_sigs}/{len(results)} SIG files")
         
         return results

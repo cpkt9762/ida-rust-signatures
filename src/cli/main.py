@@ -1234,42 +1234,53 @@ def _process_solana_library(config: Dict, lib_name: str, lib_version: str) -> bo
                     else:
                         logger.warning(f"Unknown sub-library: {sub_lib}")
                 
-                # Extract sub-libraries
+                # Extract sub-libraries and generate SIGs with proper directory structure
                 extractor = SubLibraryExtractor()
-                sub_results = extractor.extract_sublibraries_from_pat(
-                    pat_path, rust_version, components_to_extract
-                )
                 
-                # Generate SIG files for each sub-library if configured
-                sub_sig_count = 0
-                for component, sub_pat_path in sub_results.items():
-                    if sub_pat_path and sub_pat_path.exists():
-                        click.echo(f"    ✅ {component}: {sub_pat_path}")
+                # Check if SIG generation is enabled for this version
+                generate_sig = current_version_config and current_version_config.get('generate', {}).get('sig', False)
+                
+                if generate_sig:
+                    # Use the new comprehensive method
+                    sub_results = extractor.extract_and_generate_sigs(
+                        pat_path, rust_version, components_to_extract, install_to_ida=True
+                    )
+                    
+                    sub_sig_count = 0
+                    for component, result_dict in sub_results.items():
+                        pat_path = result_dict.get('pat')
+                        sig_path = result_dict.get('sig')
                         
-                        # Check if SIG generation is enabled for this version
-                        if current_version_config and current_version_config.get('generate', {}).get('sig', False):
-                            try:
-                                from ..generators.flair_generator import FLAIRGenerator
-                                flair_gen = FLAIRGenerator()
-                                sub_sig_path = sub_pat_path.with_suffix('.sig')
-                                
-                                # Generate SIG for sub-library
-                                result = flair_gen.generate_sig_with_collision_handling(
-                                    sub_pat_path, sub_sig_path, f"{component}_{rust_version}_ebpf", mode='accept'
-                                )
-                                
-                                if result and result.get('success'):
-                                    sub_sig_count += 1
-                                    click.echo(f"      ✅ SIG: {sub_sig_path}")
-                                else:
-                                    click.echo(f"      ⚠️  SIG generation failed for {component}")
-                                    
-                            except Exception as sub_sig_error:
-                                click.echo(f"      ❌ SIG generation failed for {component}: {sub_sig_error}")
-                    else:
-                        click.echo(f"    ❌ {component}: extraction failed")
+                        if pat_path and pat_path.exists():
+                            click.echo(f"    ✅ {component}: {pat_path}")
+                            
+                            if sig_path and sig_path.exists():
+                                sub_sig_count += 1
+                                click.echo(f"      ✅ SIG: {sig_path}")
+                            else:
+                                click.echo(f"      ⚠️  SIG generation failed for {component}")
+                        else:
+                            click.echo(f"    ❌ {component}: extraction failed")
+                else:
+                    # Only extract PAT files
+                    sub_results = extractor.extract_sublibraries_from_pat(
+                        pat_path, rust_version, components_to_extract
+                    )
+                    
+                    sub_sig_count = 0
+                    for component, sub_pat_path in sub_results.items():
+                        if sub_pat_path and sub_pat_path.exists():
+                            click.echo(f"    ✅ {component}: {sub_pat_path}")
+                        else:
+                            click.echo(f"    ❌ {component}: extraction failed")
                 
-                success_sub_count = sum(1 for path in sub_results.values() if path is not None)
+                # Calculate success count based on result structure
+                if generate_sig:
+                    success_sub_count = sum(1 for result_dict in sub_results.values() 
+                                          if result_dict.get('pat') is not None)
+                else:
+                    success_sub_count = sum(1 for path in sub_results.values() if path is not None)
+                
                 click.echo(f"    📊 Sub-libraries: {success_sub_count}/{len(sub_libraries)} PAT files generated")
                 if sub_sig_count > 0:
                     click.echo(f"    📊 Sub-library SIGs: {sub_sig_count}/{success_sub_count} SIG files generated")
@@ -2572,7 +2583,8 @@ def test_stdlib(solana_version: str, rust_version: Optional[str], components: st
 @click.option('--version', default='1.75.0', help='Rust version for sublibrary naming')
 @click.option('--components', default='core,std,alloc', help='Components to extract (comma-separated)')
 @click.option('--generate-sig', is_flag=True, help='Also generate SIG files for extracted PAT files')
-def extract_sublibraries(main_pat_file: str, version: str, components: str, generate_sig: bool):
+@click.option('--install-to-ida', is_flag=True, help='Automatically install SIG files to IDA Pro directory')
+def extract_sublibraries(main_pat_file: str, version: str, components: str, generate_sig: bool, install_to_ida: bool):
     """Extract Rust standard library sublibraries from main library PAT file.
     
     This approach extracts sublibrary PAT files by filtering functions from the
@@ -2603,57 +2615,81 @@ def extract_sublibraries(main_pat_file: str, version: str, components: str, gene
                 click.echo(f"   {component}: {count} functions")
         click.echo(f"   Total functions: {stats['total']}")
         
-        # Extract sublibraries
-        click.echo(f"\n🔄 Extracting sublibrary PAT files...")
-        results = extractor.extract_sublibraries_from_pat(
-            Path(main_pat_file), version, component_list
-        )
-        
-        # Display results
-        click.echo(f"\n📋 Extraction Results:")
-        success_count = 0
-        for component, pat_path in results.items():
-            if pat_path and pat_path.exists():
-                size_kb = pat_path.stat().st_size / 1024
-                func_count = len(extractor.parse_pat_file(pat_path))
-                click.echo(f"   ✅ {component}: {pat_path.name} ({func_count} functions, {size_kb:.1f}KB)")
-                success_count += 1
-            else:
-                click.echo(f"   ❌ {component}: extraction failed")
-        
-        # Generate SIG files if requested
-        if generate_sig and success_count > 0:
-            click.echo(f"\n🎯 Generating SIG files...")
-            try:
-                from ..generators.flair_generator import FLAIRGenerator
-                flair_gen = FLAIRGenerator()
+        # Extract sublibraries with optional SIG generation
+        if generate_sig:
+            click.echo(f"\n🔄 Extracting sublibrary PAT and SIG files...")
+            results = extractor.extract_and_generate_sigs(
+                Path(main_pat_file), version, component_list, install_to_ida=install_to_ida
+            )
+            
+            # Display results
+            click.echo(f"\n📋 Extraction Results:")
+            success_pat_count = 0
+            success_sig_count = 0
+            
+            for component, result_dict in results.items():
+                pat_path = result_dict.get('pat')
+                sig_path = result_dict.get('sig')
                 
-                for component, pat_path in results.items():
-                    if pat_path and pat_path.exists():
-                        try:
-                            # Generate SIG file with same naming pattern
-                            sig_path = pat_path.with_suffix('.sig')
-                            sig_result = flair_gen.generate_sig_with_collision_handling(
-                                pat_path, sig_path, f"Rust {component.title()} Library {version}", mode='accept'
-                            )
-                            if sig_result and sig_path.exists():
-                                size_kb = sig_path.stat().st_size / 1024
-                                click.echo(f"   ✅ {component}: {sig_path.name} ({size_kb:.1f}KB)")
-                            else:
-                                click.echo(f"   ❌ {component}: SIG generation failed")
-                        except Exception as e:
-                            click.echo(f"   ⚠️ {component}: SIG generation error - {e}")
-            except ImportError:
-                click.echo(f"   ⚠️ FLAIR tools not available for SIG generation")
+                if pat_path and pat_path.exists():
+                    size_kb = pat_path.stat().st_size / 1024
+                    func_count = len(extractor.parse_pat_file(pat_path))
+                    click.echo(f"   ✅ {component}: {pat_path.name} ({func_count} functions, {size_kb:.1f}KB)")
+                    success_pat_count += 1
+                    
+                    if sig_path and sig_path.exists():
+                        sig_size_kb = sig_path.stat().st_size / 1024
+                        click.echo(f"      ✅ SIG: {sig_path.name} ({sig_size_kb:.1f}KB)")
+                        success_sig_count += 1
+                        
+                        if install_to_ida:
+                            click.echo(f"      📥 Installed to IDA Pro")
+                    else:
+                        click.echo(f"      ❌ SIG generation failed")
+                else:
+                    click.echo(f"   ❌ {component}: extraction failed")
+            
+            click.echo(f"\n📊 Summary: {success_pat_count}/{len(component_list)} PAT files, "
+                      f"{success_sig_count}/{len(component_list)} SIG files")
+        else:
+            # Only extract PAT files
+            click.echo(f"\n🔄 Extracting sublibrary PAT files...")
+            results = extractor.extract_sublibraries_from_pat(
+                Path(main_pat_file), version, component_list
+            )
+            
+            # Display results
+            click.echo(f"\n📋 Extraction Results:")
+            success_count = 0
+            for component, pat_path in results.items():
+                if pat_path and pat_path.exists():
+                    size_kb = pat_path.stat().st_size / 1024
+                    func_count = len(extractor.parse_pat_file(pat_path))
+                    click.echo(f"   ✅ {component}: {pat_path.name} ({func_count} functions, {size_kb:.1f}KB)")
+                    success_count += 1
+                else:
+                    click.echo(f"   ❌ {component}: extraction failed")
+            
+            click.echo(f"\n📊 Summary: {success_count}/{len(component_list)} PAT files")
         
         # Validation
         click.echo(f"\n✅ Validation:")
-        validation_results = extractor.validate_sublibrary_extraction(Path(main_pat_file), results)
-        valid_count = sum(1 for valid in validation_results.values() if valid)
-        click.echo(f"   Valid extractions: {valid_count}/{len(component_list)}")
-        
-        click.echo(f"\n🎉 Sublibrary extraction completed!")
-        click.echo(f"   Successful extractions: {success_count}/{len(component_list)}")
+        if generate_sig:
+            # Extract PAT paths for validation from the results dict
+            pat_results = {comp: result_dict.get('pat') for comp, result_dict in results.items()}
+            validation_results = extractor.validate_sublibrary_extraction(Path(main_pat_file), pat_results)
+            valid_count = sum(1 for valid in validation_results.values() if valid)
+            click.echo(f"   Valid extractions: {valid_count}/{len(component_list)}")
+            
+            click.echo(f"\n🎉 Sublibrary extraction completed!")
+            click.echo(f"   Successful extractions: {success_pat_count}/{len(component_list)}")
+        else:
+            validation_results = extractor.validate_sublibrary_extraction(Path(main_pat_file), results)
+            valid_count = sum(1 for valid in validation_results.values() if valid)
+            click.echo(f"   Valid extractions: {valid_count}/{len(component_list)}")
+            
+            click.echo(f"\n🎉 Sublibrary extraction completed!")
+            click.echo(f"   Successful extractions: {success_count}/{len(component_list)}")
         
     except Exception as e:
         logger.exception("Sublibrary extraction failed")
